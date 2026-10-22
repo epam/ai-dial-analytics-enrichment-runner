@@ -1,0 +1,15 @@
+-- Whether a group has ever been signalled complete, enforcing a group rule's ready_when.signal.
+--
+-- The verdict is NOT evaluated here: ADAS computes the rule's predicate inside the scan query and
+-- projects it as the boolean `__signal` on each scanned row, so the runner only records what it was
+-- told. Re-implementing ADAS's bounded predicate grammar would be a second grammar free to diverge,
+-- and a divergence would mark the wrong groups ready rather than failing.
+--
+-- Monotone like group_version and last_activity_at: the dirty-mark upsert ORs the incoming value into
+-- the stored one, so replaying a page or re-driving an older window can never un-signal a group. It is
+-- never reset by an evaluation either — a group declared complete stays complete, and a late member
+-- makes it dirty again at a version the sweep will pick up promptly rather than after the idle window.
+--
+-- Additive and backwards-compatible: existing groups start out un-signalled, which for a rule that
+-- declares no signal is the only state they can ever be in.
+ALTER TABLE group_state ADD COLUMN signalled BOOLEAN NOT NULL DEFAULT FALSE;

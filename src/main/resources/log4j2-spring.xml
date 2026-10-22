@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="${env:LOGGER_STATUS_LOG_LEVEL:-WARN}">
+
+    <!-- No monitorInterval: runtime level changes come from the mounted level file (LOG_CONFIG_PATH), applied
+         per logger with a time box and an audit line. A whole-configuration reload would compete with it. -->
+
+    <Appenders>
+        <!-- Each correlation field is wrapped in %notEmpty, so a record with no pipeline, task or trace in scope
+             (startup, framework lines, the sync job) carries none of the keys instead of empty "key=" pairs. -->
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout
+                    pattern="%style{%d{ISO8601}}{green} %highlight{%-5level} %notEmpty{trace_id=%X{trace_id} span_id=%X{span_id} }[%style{%t}{bright,blue}] %style{%c{1.}}{bright,yellow} %notEmpty{pipeline=%X{pipeline_name} }%notEmpty{gen=%X{pipeline_generation} }%notEmpty{task=%X{task} }- %msg%n%throwable"/>
+        </Console>
+        <!-- buffer startup log events until OpenTelemetryLogAppenderConfiguration installs the SDK,
+             so logs emitted before Spring context refresh still reach the OTLP exporter -->
+        <!-- An explicit MDC allow-list, never "*": grain_key and group_key may carry user identifiers, and the
+             trace context is already on every record. -->
+        <OpenTelemetry name="OpenTelemetryAppender" numLogsCapturedBeforeOtelInstall="1000"
+                       captureContextDataAttributes="pipeline_name,pipeline_generation,chunk_id,task,task_instance,run_id"/>
+    </Appenders>
+
+    <Loggers>
+        <Root level="INFO">
+            <AppenderRef ref="OpenTelemetryAppender" level="All"/>
+            <AppenderRef ref="Console"/>
+        </Root>
+
+        <Logger name="com.epam" level="${env:APP_LOG_LEVEL:-INFO}"/>
+
+        <!-- Spring's HTTP client logs request and response bodies at DEBUG/TRACE. For this service those
+             bodies are the enrichment payloads: a rendered prompt carries the source content a pipeline reads,
+             which for a body-reading pipeline is sensitive data. Raising the root level for diagnosis must not
+             silently start writing that to the log pipeline, so these loggers are pinned at INFO
+             independently of APP_LOG_LEVEL. The runner's own code never logs content at any level; this is
+             what stops the framework doing it on the runner's behalf.
+
+             Overriding these (or supplying a different log4j2 configuration) re-enables body logging — a
+             deployment handling sensitive data should not.
+
+             The statement loggers are pinned for the same reason: SQL text and bound values carry row content.
+             Each pin is its own logger entry, so a runtime level applied to an ancestor leaves it in place; the
+             runtime level file refuses anything below INFO for these names and their descendants. -->
+        <Logger name="org.springframework.web.client" level="INFO"/>
+        <Logger name="org.springframework.http.converter" level="INFO"/>
+        <Logger name="org.hibernate.SQL" level="INFO"/>
+        <Logger name="org.hibernate.orm.jdbc.bind" level="INFO"/>
+        <Logger name="org.springframework.jdbc.core" level="INFO"/>
+    </Loggers>
+
+</Configuration>

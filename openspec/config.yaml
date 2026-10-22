@@ -1,0 +1,176 @@
+schema: spec-driven
+
+# Project context shown to AI when creating artifacts.
+context: |
+  # Analytics Enrichment Runner — Project Conventions
+
+  ## What this is
+  A standalone Spring Boot / Java service running Class-2 (ML/LLM) enrichment for DIAL Analytics 2.0.
+  It incrementally scans ADAS (analytics-data-access-service) source tables via ADAS's pipeline-scoped
+  endpoints, calls DIAL Core LLMs to derive per-row labels, and writes results back to ADAS-managed
+  ClickHouse enrichment side-tables. The runner holds NO definitions and NO ClickHouse connection —
+  pipeline definitions live in the ADAS control-plane; the runner syncs the enabled pipelines
+  of kind `enrich` and owns only its own PostgreSQL runtime state (db-scheduler job queue, scan cursors,
+  DLQ, spend counters).
+  Correctness model: at-least-once execution, exactly-once EFFECT (duplicate writes collapse on the
+  enrichment table's ReplacingMergeTree grain key read with final=1).
+
+  ## Tech stack (pinned, mirrors ADAS)
+  - Java 25 (Gradle toolchain), Spring Boot 4.0.6 (Web MVC), Gradle wrapper 9.6.0, `-Werror`.
+  - Jackson 3 (tools.jackson) configured in JsonMapperConfiguration (case-insensitive enum reads).
+  - Log4j2 (Boot's Logback starter excluded). Actuator + Micrometer Prometheus + OpenTelemetry.
+  - springdoc-openapi. MapStruct (componentModel="spring") + Lombok. Checkstyle (Google, 180-char).
+  - PostgreSQL via Spring Data JPA (Hibernate + HikariCP); schema provisioned by Boot's Flyway
+    auto-config from classpath:db/migration/postgres.
+  - db-scheduler (Postgres-backed job library) with JacksonSerializer + TransactionAwareDataSourceProxy.
+  - Resilience4j (rate limiter + backoff) around the DIAL client. JSONata (com.dashjoin:jsonata,
+    SAME version as ADAS) for field mapping. com.networknt:json-schema-validator for response_format.
+  - HTTP: Spring RestClient for ADAS + DIAL Core calls. No ClickHouse/blob/Calcite/Arrow deps.
+  Prefer Spring Boot BOM-managed versions; pin explicitly only when unmanaged or for a CVE fix.
+
+  ## Package layout
+  Base package `com.epam.aidial.enrichment`:
+  - AnalyticsEnrichmentRunnerApplication — Spring Boot entry point.
+  - configuration/ — @Configuration classes and properties.
+  - web/controller/ — @RestController endpoints (versioned under /v1); web/dto/ — records + @Schema;
+    web/mapper/ — MapStruct; web/handler/ — ErrorView + DefaultExceptionHandler.
+  - web/security/ (+ web/security/apikey/) — inbound auth. DELIBERATELY mirrors ADAS's own
+    src/main/java/.../web/security/ layout file-for-file so the two stay diffable as ADAS evolves; this is
+    why its @ConfigurationProperties holders and @Configuration classes live here rather than in
+    configuration/. Keep new security code in this package and keep the names aligned with ADAS.
+  - service/ — business logic; sync/, scan/, worker/, dial/, adas/, dlq/, spend/, backfill/ as the
+    feature areas land. exception/ — custom exceptions.
+
+  ## API & error conventions
+  - Functional endpoints under /v1; operational under /actuator/*. Responses are objects, not bare
+    arrays.
+  - Every failure returns the stable ErrorView shape {status, error, message, path, method}; `error`
+    is a stable machine code. Map new failure modes by adding an @ExceptionHandler to
+    DefaultExceptionHandler.
+
+  ## Configuration
+  - Env-driven via application.yml using ${ENV_VAR:default}. Property descriptions live ONLY in
+    docs/configuration.md (one table per config group). Keep application.yml to bare key: ${ENV:default}
+    lines; do not add env-var description tables to README.md. No secrets in source.
+
+  ## Testing & quality
+  - JUnit 5 + AssertJ; @SpringBootTest for context/integration (Testcontainers PostgreSQL), slice
+    tests for controllers; WireMock stubs for ADAS + DIAL. A change is not done until
+    `./gradlew clean build` passes (compile + checkstyle + tests). Requires a running Docker daemon.
+
+  ## ADAS integration contract (as-built; the runner is a client)
+  ADAS folded its `rule` registry into its `pipeline` registry as the ENRICH kind; `/v1/rules` no longer
+  exists. The identity is the pipeline NAME (^[a-z][a-z0-9_-]{0,63}$, validated by ADAS at registration,
+  immutable). The runner does not re-validate it and depends on the `#` exclusion: `#` delimits its
+  db-scheduler instance ids, so `a#b` and `a` would otherwise share a prefix.
+  CONTRACT VERSION: every ADAS call carries the `Adas-Contract-Version` request header naming
+  `AdasContract.VERSION`, and every ADAS response MUST carry the same value back. Set and verified in ONE
+  place — `AdasContractInterceptor` on the single shared `RestClient` — so a client added later cannot omit
+  it. Echo absent -> ADAS predates the contract; echo different -> ADAS is on the other side of a bump;
+  both are `incompatible`, and the runner then keeps its cache and tasks, does not reconcile, does not mark
+  the sync succeeded, makes no model call and attempts no write-back (work items are HELD, not failed).
+  A code constant, never configuration — same reason as `view=compiled`: the only wrong setting disables
+  every pipeline at once, silently. Raising it ships in the same window as ADAS's `RunnerContract.VERSION`.
+  SCOPE: ADAS sets the echo on every response under `/v1/pipelines`, ahead of its security chain (so a 401
+  or 503 carries it and stays an ordinary failure). All five of the runner's call sites lie under that
+  prefix; a sixth added elsewhere would receive NO echo and read as a skew, so adding one is a change to
+  BOTH halves of the contract.
+  - Pipeline sync: GET /v1/pipelines?kind=enrich&enabled=true&view=compiled[&updated_since] -> the
+    ENVELOPE {"pipelines":[...]}, not a bare array (NO ETag/304); client-side `generation` diff drives
+    PipelineCache + recurring-task reconciliation. `kind=enrich` is load-bearing: the registry also holds
+    `aggregate` pipelines ADAS runs itself. `view=compiled` is MANDATORY: the default is view=source, the
+    authored declaration, which carries no derived response_schema, no grain_key, no version_column, no
+    resolved outputs and no resolved inputs — a different, cheaper object, not a degraded feed, in which
+    every pipeline is unrunnable. The DTO is one flat shape for both kinds, with the trigger NESTED:
+    trigger{kind(schedule|group), cron, group_by,
+    ready_when{signal,idle,max_staleness,cost_ceiling}, member_select}; plus version_column, grain_key,
+    a derived top-level response_schema, and the authored `transform`{type(llm|sql), preset, model, params,
+    request_template, inputs, outputs}. `generation`, `created_at` and `updated_at` stay
+    top-level — they are declaration facts, not runtime state.
+    ONE FACT, ONE NAME: what the transform receives is `transform.inputs`, a map keyed by variable name
+    whose value carries exactly one of {column} or {jsonata}; where each model response property lands is `outputs`,
+    an ordered list of {name, column, jsonata?} already resolved by ADAS (`name` is the response property
+    and the column's EXPOSED name, `column` the physical one — never infer either from the other); the
+    knobs are nested under `advanced`{rows_per_scan, rows_per_call, rate_rpm, sample_fraction}, each
+    absent when unset, meaning "apply the runner's configured default". There is no per-pipeline scan
+    clock: `on_ingest` and `scan_every` are retired (contract 3), a row-grain pipeline fires on its
+    `trigger.cron`, and a group pipeline's mark scan on the runner's `group.scan-cadence`. The
+    retired second vocabulary — input_bindings, output_bindings, cadence, scan_every, batch_scan_limit,
+    batch_chunk, sampling, a top-level rate_rpm or vars, input_vars and output_vars — is gone from every
+    response and is not modelled here.
+  - Scan: POST /v1/pipelines/{name}/scan {cursor?,limit,from?,to?} -> {rows[], next_cursor, has_more,
+    lag_seconds?}. Cursor is opaque/ADAS-owned; store verbatim. For a group pipeline the same page also
+    carries group_by and the input's version column (by its physical name, per the pipeline's
+    version_column), plus - when the pipeline declares ready_when.signal - ADAS's computed verdict of
+    that predicate per row as the `__signal` column (the verdict, never the raw columns it references, so
+    the runner never parses the grammar). A sql pipeline is REJECTED here (422) - use materialize.
+    For a row-trigger pipeline whose target is ALIGNED (contract 4), every row also carries `__partition_v`
+    (ISO-8601 string, the source row's partition value); ChunkBuilder keeps it on the ChunkRow.
+  - Group assembly: POST /v1/pipelines/{name}/group-rows {group_key,limit?} -> {rows[], truncated}. Row
+    and byte capped, NO pagination: truncated means the remainder is unreachable.
+  - Materialize (Class-1): POST /v1/pipelines/{name}/materialize {cursor?,limit?,from?,to?} ->
+    {rows_written, next_cursor, has_more, lag_seconds}. ADAS probes the window then writes it; no row
+    payload either direction; advance the cursor only on 2xx. An llm pipeline is REJECTED here (422).
+  - Write-back: POST /v1/pipelines/{name}/rows {rows:[{grain + outputs + provenance}]} -> {inserted}.
+    Permitted provenance: pipeline_generation, model, enriched_at, group_version, truncated - all
+    un-prefixed; ADAS silently drops any the target lacks, and rejects `_`-prefixed or undeclared
+    columns. Wire format is snake_case with lowercase enum values throughout. A row scanned with
+    `__partition_v` is written back with it, unchanged and as a string; a row scanned without it never
+    names it (ADAS requires it on an aligned target and refuses it as a system column on any other).
+  - Errors: 404 unknown_pipeline, 422 pipeline_validation_failed, 409 pipeline_conflict,
+    403 pipeline_access_denied, 409 runner_contract_required, 409 runner_contract_mismatch,
+    422 write_output_column_required. No client of the runner's branches on an ADAS error CODE; the only
+    ADAS-specific condition it reads is the contract echo (above), taken from the response HEADER and not
+    from the status, so the three contract-era codes need no client-side classification — an ADAS carrying
+    the echo is an ordinary failure whatever it answers, and one that does not is a skew whatever it
+    answers. Status CLASS is still read, by `RetryableStatus` alone (5xx/429/408/425 retry, every other 4xx
+    is permanent), which is what makes a 409 from a skewed pair permanent to the predecessor image.
+  - Registration (operator-side, not the runner's): POST /v1/pipelines with "kind":"enrich";
+    PATCH /v1/pipelines/{name} for updates; DELETE /v1/pipelines/{name}. `name` is immutable.
+  - Model: POST {DIAL}/openai/deployments/{model}/chat/completions, Api-Key header,
+    response_format=json_schema. One DIAL Api-Key authenticates both ADAS and DIAL; authz is by the
+    pipeline's target-enrichment WRITE grant.
+
+  ## Scope
+  Three execution lanes, chosen by transform type and trigger kind:
+  - row x llm: scan -> chunk -> DIAL -> validate -> write (write is a separate work item, so an upsert
+    retry never re-calls the model).
+  - group x llm: the same scan doubles as a dirty-mark into runner-owned group_state (cost proportional
+    to new rows, not to group count); a scheduled readiness sweep enqueues groups that are dirty, ready
+    (the OR of the ready_when conditions the pipeline declares: idle / max_staleness / a recorded signal
+    verdict, which fires with no time bound) and within ready_when.cost_ceiling; one group = one model
+    call = one row.
+  - row x sql (Class-1): no model call; ADAS materializes the derivation set-based via
+    POST /v1/pipelines/{name}/materialize and the runner only drives cadence, window and cursor.
+  Backfill covers all three lanes and may be bounded to a [from, to] version window.
+  chat_completion preset only; single active replica.
+
+  ## Sensitive-data posture
+  The runner requires an ADAS identity entitled to read `sensitive` columns (FULL_ADMIN) for any pipeline
+  referencing one — ADAS rejects rather than strips, so there is no degraded mode. This supersedes the
+  earlier least-privilege stance. It widens which COLUMNS a pipeline may reference, not which PIPELINES
+  the runner may operate. Source content is never logged at any level (Spring's HTTP body loggers are pinned
+  at INFO for that reason); a group work item carries keys only; derived content persists solely in a
+  dead-letter raw_response under the DLQ retention window.
+
+  ## Deferred
+  Other invoker presets (text_classification, dial-enrich/v1, embeddings); multi-replica rate limiting;
+  per-tenant DIAL keys; dynamic dry-run; cost/pricing (usage units only); a narrower per-pipeline
+  sensitive grant.
+
+  ## Public-repo hygiene
+
+  The repository is open source, and every proposal, design, task list and spec is published with
+  it, archive included. Follow the "Public-repo hygiene" rules in `CLAUDE.md`:
+  - no environment attribution (dev/UAT/prod, "reference deployment");
+  - no operational history (incident dates, MR numbers, branch chatter, people or teams);
+  - no figures measured on real data — use order-of-magnitude wording, and invent scenario numbers;
+  - real entity names may appear, but described by function, never as live or deployed;
+  - no references to untracked `*.local.md` files or to design ids that resolve nowhere;
+  - no machine-specific commands.
+
+# Per-artifact rules.
+rules:
+  tasks:
+    - A change is not done until `./gradlew clean build` passes (compile + checkstyle + tests).
+    - Update docs/configuration.md in the same change when adding env-driven config.

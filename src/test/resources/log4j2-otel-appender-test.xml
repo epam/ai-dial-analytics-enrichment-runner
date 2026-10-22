@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Loaded explicitly by OpenTelemetryLogAppenderConfigurationTest (never auto-discovered: the name is
+     neither log4j2.xml nor log4j2-spring.xml). Mirrors the OpenTelemetry appender declaration from
+     src/main/resources/log4j2-spring.xml so the test exercises the same install path production uses. -->
+<Configuration status="WARN">
+
+    <Appenders>
+        <OpenTelemetry name="OpenTelemetryAppender" numLogsCapturedBeforeOtelInstall="1000"/>
+    </Appenders>
+
+    <Loggers>
+        <Root level="INFO">
+            <AppenderRef ref="OpenTelemetryAppender"/>
+        </Root>
+    </Loggers>
+
+</Configuration>

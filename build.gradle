@@ -1,0 +1,188 @@
+plugins {
+    id 'java'
+    id 'checkstyle'
+    id 'io.freefair.lombok' version '9.5.0'
+    id 'org.springframework.boot' version '4.0.8'
+}
+
+group = 'com.epam.aidial'
+version = '0.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+configurations {
+    compileOnly {
+        extendsFrom annotationProcessor
+    }
+    configureEach {
+        // Log4j2 is the chosen logging backend; drop Boot's default Logback starter.
+        exclude group: 'org.springframework.boot', module: 'spring-boot-starter-logging'
+    }
+}
+
+checkstyle {
+    toolVersion = '10.21.4'
+    configDirectory = file("$rootProject.projectDir/checkstyle")
+    configProperties['org.checkstyle.google.suppressionfilter.config'] =
+            file("$rootDir/checkstyle/checkstyle-suppressions.xml")
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation platform(org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES)
+    // Overrides the Boot-BOM-managed OpenTelemetry — unbounded memory allocation in W3C baggage
+    // propagation, patched in 1.62.0 (aligned with ADAS).
+    implementation platform('io.opentelemetry:opentelemetry-bom:1.62.0')
+
+    implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.apache.commons:commons-lang3'
+
+    // PostgreSQL runtime-state store (db-scheduler job state + runner cursors/DLQ/spend). Brings
+    // Hibernate, HikariCP and spring-jdbc, giving the runner its Spring-managed DataSource.
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    // Spring Boot 4 split Flyway auto-configuration out of spring-boot-autoconfigure into its own
+    // module; without it Boot never runs the PostgreSQL migrations under db/migration/postgres.
+    implementation 'org.springframework.boot:spring-boot-flyway'
+    runtimeOnly 'org.postgresql:postgresql'
+    // Flyway 11 ships per-database support as separate modules; flyway-core no longer bundles
+    // PostgreSQL, so Boot's Flyway autoconfig fails with "Unsupported Database: PostgreSQL" without
+    // this. BOM-managed (Spring Boot 4 -> Flyway 11.x), kept in lockstep with flyway-core.
+    runtimeOnly 'org.flywaydb:flyway-database-postgresql'
+
+    implementation('org.springframework.boot:spring-boot-starter-log4j2') {
+        exclude group: 'org.apache.logging.log4j'
+    }
+    implementation 'org.apache.logging.log4j:log4j-slf4j2-impl:2.25.4'
+    implementation 'org.apache.logging.log4j:log4j-core:2.25.4'
+
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+    // OTLP export of metrics/traces/logs, disabled by default (see docs/configuration.md §
+    // OpenTelemetry). Prometheus above stays additive.
+    implementation 'org.springframework.boot:spring-boot-starter-opentelemetry'
+    // All three signals must leave the process through the SAME OpenTelemetry SDK so they share one
+    // Resource. Boot 4's OTel module configures tracing and logging only; its metrics path is
+    // Micrometer's own OtlpMeterRegistry, which stamps a resource of its own that cannot be
+    // overridden (telemetry.sdk.* is on its reserved list). This shim bridges the Micrometer
+    // MeterRegistry API onto the OTel SDK's meter provider instead. See
+    // OpenTelemetryMetricsConfiguration. Version matches the log4j appender's instrumentation line.
+    implementation 'io.opentelemetry.instrumentation:opentelemetry-micrometer-1.5:2.28.1-alpha'
+    // Used directly by OpenTelemetryMetricsConfiguration to build the SdkMeterProvider and its OTLP
+    // metric exporter. Both arrive transitively via the starter, but only on the runtime classpath —
+    // declared explicitly because main code compiles against them. BOM-managed (opentelemetry-bom).
+    implementation 'io.opentelemetry:opentelemetry-sdk'
+    implementation 'io.opentelemetry:opentelemetry-exporter-otlp'
+    // Routes log4j2 events into the OTel SDK; the official starter does not auto-install the
+    // appender. Version aligned with the OTel API 1.62.0 pinned via opentelemetry-bom above.
+    implementation 'io.opentelemetry.instrumentation:opentelemetry-log4j-appender-2.17:2.28.1-alpha'
+
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.3'
+
+    // Inbound authentication: OAuth2 resource server validating Bearer JWTs from multiple OIDC
+    // issuers, plus a DIAL Core Api-Key filter layered on top. Both starters are BOM-managed; the
+    // resource-server starter pulls in spring-security-oauth2-jose and nimbus-jose-jwt transitively
+    // for JWKS-backed JWT decoding. Inactive unless SECURITY_MODE=oidc (see docs/configuration.md).
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-security-oauth2-resource-server'
+    // Caches successful DIAL Core API-key introspections so a valid key hits Core at most once per
+    // TTL. BOM-managed; not otherwise on the runtime classpath.
+    implementation 'com.github.ben-manes.caffeine:caffeine'
+
+    implementation 'org.mapstruct:mapstruct:1.6.3'
+    annotationProcessor 'org.mapstruct:mapstruct-processor:1.6.3'
+
+    // db-scheduler (Postgres-backed job queue). Core library only — the runner wires the Scheduler
+    // bean itself (JacksonSerializer + TransactionAwareDataSourceProxy) rather than using the Spring
+    // Boot starter, whose auto-configuration targets Boot 3. Not BOM-managed; pinned.
+    implementation 'com.github.kagkarlsson:db-scheduler:15.6.0'
+    // db-scheduler's JacksonSerializer serializes task data with Jackson 2 (com.fasterxml). Boot 4's
+    // primary mapper is Jackson 3 (tools.jackson), so Jackson 2 databind is added explicitly for the
+    // serializer. Version comes from the CVE constraint below.
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+
+    // JSONata evaluation for input/output field mapping. Pinned to the SAME version ADAS uses so a
+    // rule expression that parses at ADAS registration evaluates identically here. Not BOM-managed.
+    implementation 'com.dashjoin:jsonata:0.9.10'
+
+    // JSON Schema validation of the model's structured output (response_format = json_schema) and the
+    // repair gate. Operates on Jackson 2 nodes (already on the classpath). Not BOM-managed; pinned.
+    implementation 'com.networknt:json-schema-validator:1.5.6'
+
+    // Resilience4j token-bucket rate limiter around DIAL calls. Core module only (no Spring Boot
+    // starter) — the runner builds the RateLimiterRegistry itself, avoiding Boot 4 autoconfig risk.
+    // Per-JVM; a courtesy limiter (DIAL Core's own per-key limit is the real backstop). Not BOM-managed.
+    implementation 'io.github.resilience4j:resilience4j-ratelimiter:2.3.0'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+    testImplementation 'org.assertj:assertj-core:3.27.7'
+    // In-memory span exporter for asserting the runner's explicit spans. BOM-managed (opentelemetry-bom).
+    testImplementation 'io.opentelemetry:opentelemetry-sdk-testing'
+
+    // Testcontainers for integration tests against a real PostgreSQL. Versions are Spring Boot BOM-
+    // managed (the Boot 4 BOM imports the Testcontainers BOM -> 2.0.x); no explicit pins.
+    // Testcontainers 2.0 renamed the module artifactIds to the `testcontainers-` prefix
+    // (`testcontainers-postgresql`, `testcontainers-junit-jupiter`); the old coordinates stop at
+    // 1.21.x and do not resolve under the 2.0 BOM. Requires a running Docker daemon.
+    testImplementation 'org.springframework.boot:spring-boot-testcontainers'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
+
+    // WireMock stubs ADAS (and, from M4, DIAL Core) in component tests. The standalone artifact
+    // shades its own Jetty/servlet stack, avoiding conflicts with Boot's embedded Tomcat. Pinned.
+    testImplementation 'org.wiremock:wiremock-standalone:3.13.1'
+
+    // Security test support, plus jjwt for minting locally-signed (HMAC) JWTs in auth slice tests so
+    // they need no live JWKS endpoint. Aligned with ADAS.
+    testImplementation 'org.springframework.boot:spring-boot-starter-security-test'
+    testImplementation 'io.jsonwebtoken:jjwt-api:0.13.0'
+    testRuntimeOnly 'io.jsonwebtoken:jjwt-impl:0.13.0'
+    testRuntimeOnly 'io.jsonwebtoken:jjwt-jackson:0.13.0'
+
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    constraints {
+        // All three embedded-Tomcat modules move together: only -core carries the CVEs, but
+        // -websocket and -el share its internals and must not lag behind the BOM-managed line.
+        implementation('org.apache.tomcat.embed:tomcat-embed-core:11.0.25') {
+            because('CVE-2026-65182, CVE-2026-65905, CVE-2026-68525')
+        }
+        implementation('org.apache.tomcat.embed:tomcat-embed-websocket:11.0.25') {
+            because('kept in lockstep with tomcat-embed-core')
+        }
+        implementation('org.apache.tomcat.embed:tomcat-embed-el:11.0.25') {
+            because('kept in lockstep with tomcat-embed-core')
+        }
+        implementation('com.fasterxml.jackson.core:jackson-databind:2.21.7') {
+            because('CVE-2026-54512, CVE-2026-54513, CVE-2026-68497, CVE-2026-91776, CVE-2026-91777')
+        }
+        implementation('com.fasterxml.jackson.core:jackson-core:2.21.7') {
+            because('CVE-2026-89407, CVE-2026-89425')
+        }
+        implementation('tools.jackson.core:jackson-databind:3.1.7') {
+            because('CVE-2026-54512, CVE-2026-54513, CVE-2026-68497, CVE-2026-91776, CVE-2026-91777')
+        }
+        implementation('tools.jackson.core:jackson-core:3.1.7') {
+            because('CVE-2026-89407, CVE-2026-89425')
+        }
+        implementation('org.postgresql:postgresql:42.7.12') {
+            because('CVE-2026-42198, CVE-2026-54291')
+        }
+    }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += '-Werror'
+}

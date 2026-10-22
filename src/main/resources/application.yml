@@ -1,0 +1,180 @@
+spring:
+  application:
+    name: analytics-enrichment-runner
+  lifecycle:
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:30s}
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DATABASE:testdb}?${POSTGRES_OPS:}
+    driver-class-name: org.postgresql.Driver
+    username: ${POSTGRES_DATASOURCE_USERNAME:postgres}
+    password: ${POSTGRES_DATASOURCE_PASSWORD:postgres}
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+  flyway:
+    enabled: ${POSTGRES_MIGRATIONS_ENABLED:true}
+    locations: classpath:db/migration/postgres
+
+server:
+  port: ${HTTP_PORT:5000}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db,pipelineSync
+        liveness:
+          include: livenessState
+  opentelemetry:
+    resource-attributes:
+      "service.name": ${OTEL_SERVICE_NAME:analytics-enrichment-runner}
+    tracing:
+      export:
+        otlp:
+          endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}/v1/traces}
+          transport: ${OTEL_EXPORTER_OTLP_PROTOCOL:http}
+    logging:
+      export:
+        otlp:
+          endpoint: ${OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}/v1/logs}
+          transport: ${OTEL_EXPORTER_OTLP_PROTOCOL:http}
+  tracing:
+    export:
+      enabled: ${OTEL_TRACES_EXPORT_ENABLED:${OTEL_EXPORT_ENABLED:false}}
+    sampling:
+      probability: ${OTEL_TRACES_SAMPLING_PROBABILITY:1.0}
+  logging:
+    export:
+      otlp:
+        enabled: ${OTEL_LOGS_EXPORT_ENABLED:${OTEL_EXPORT_ENABLED:false}}
+  otlp:
+    metrics:
+      export:
+        enabled: false
+
+opentelemetry:
+  metrics:
+    enabled: ${OTEL_METRICS_EXPORT_ENABLED:${OTEL_EXPORT_ENABLED:false}}
+    endpoint: ${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}/v1/metrics}
+    protocol: ${OTEL_EXPORTER_OTLP_PROTOCOL:http}
+    interval: ${OTEL_METRICS_EXPORT_INTERVAL:60s}
+
+springdoc:
+  api-docs:
+    enabled: ${API_DOCS_ENABLED:true}
+  swagger-ui:
+    enabled: ${SWAGGER_UI_ENABLED:true}
+
+security:
+  mode: ${SECURITY_MODE:none}
+  require-email: ${SECURITY_REQUIRE_EMAIL:false}
+  disable-swagger-authorization: ${DISABLE_SWAGGER_AUTHORIZATION:false}
+  defaults:
+    roles-mapping: "${SECURITY_ROLES_MAPPING:{\"ConfigAdmin\":[\"FULL_ADMIN\"],\"admin\":[\"FULL_ADMIN\"]}}"
+    email-claim: ${SECURITY_EMAIL_CLAIM:unique_name}
+    principal-claim: ${SECURITY_USER_CLAIM:oid}
+  api-key:
+    enabled: ${API_KEY_ENABLED:false}
+    core-url: ${API_KEY_CORE_URL:}
+    cache-ttl-seconds: ${API_KEY_CACHE_TTL_SECONDS:60}
+    cache-max-size: ${API_KEY_CACHE_MAX_SIZE:10000}
+    request-timeout-ms: ${API_KEY_REQUEST_TIMEOUT_MS:3000}
+    roles-mapping: "${API_KEY_ROLES_MAPPING:}"
+    startup-probe: ${API_KEY_STARTUP_PROBE:false}
+  opaque-token:
+    cache-ttl-seconds: ${OPAQUE_TOKEN_CACHE_TTL_SECONDS:60}
+    cache-max-size: ${OPAQUE_TOKEN_CACHE_MAX_SIZE:10000}
+    request-timeout-ms: ${OPAQUE_TOKEN_REQUEST_TIMEOUT_MS:3000}
+
+adas:
+  base-url: ${ADAS_BASE_URL:http://localhost:5000}
+  api-key: ${ADAS_API_KEY:}
+  connect-timeout-ms: ${ADAS_CONNECT_TIMEOUT_MS:5000}
+  read-timeout-ms: ${ADAS_READ_TIMEOUT_MS:180000}
+  pipelines:
+    poll-interval-ms: ${ADAS_PIPELINES_POLL_INTERVAL_MS:30000}
+    initial-delay-ms: ${ADAS_PIPELINES_INITIAL_DELAY_MS:10000}
+
+db-scheduler:
+  heartbeat: ${DB_SCHEDULER_HEARTBEAT:45s}
+  polling-interval: ${DB_SCHEDULER_POLLING_INTERVAL:10s}
+  threads: ${DB_SCHEDULER_THREADS:3}
+  auto-start: ${DB_SCHEDULER_AUTO_START:true}
+
+dial:
+  base-url: ${DIAL_BASE_URL:http://localhost:5000}
+  api-key: ${DIAL_API_KEY:${ADAS_API_KEY:}}
+  api-version: ${DIAL_API_VERSION:2025-01-01-preview}
+  connect-timeout-ms: ${DIAL_CONNECT_TIMEOUT_MS:5000}
+  read-timeout-ms: ${DIAL_READ_TIMEOUT_MS:60000}
+  default-rpm: ${DIAL_DEFAULT_RPM:60}
+  rate-limiter-timeout: ${DIAL_RATE_LIMITER_TIMEOUT:5s}
+
+worker:
+  repair-retries: ${WORKER_REPAIR_RETRIES:1}
+  row-parallelism: ${WORKER_ROW_PARALLELISM:4}
+  max-attempts: ${WORKER_MAX_ATTEMPTS:5}
+  backoff-base: ${WORKER_BACKOFF_BASE:10s}
+
+dlq:
+  retention-days: ${DLQ_RETENTION_DAYS:30}
+  sweep-cron: ${DLQ_SWEEP_CRON:0 0 3 * * *}
+  breaker:
+    threshold: ${DLQ_BREAKER_THRESHOLD:500}
+    fraction: ${DLQ_BREAKER_FRACTION:0.5}
+    group-window: ${DLQ_BREAKER_GROUP_WINDOW:50}
+    pause-for: ${DLQ_BREAKER_PAUSE_FOR:15m}
+    pause-max: ${DLQ_BREAKER_PAUSE_MAX:4h}
+
+spend:
+  pause:
+    enabled: ${SPEND_PAUSE_ENABLED:false}
+  budget:
+    daily-calls: ${SPEND_BUDGET_DAILY_CALLS:0}
+    daily-tokens: ${SPEND_BUDGET_DAILY_TOKENS:0}
+
+scan:
+  default-scan-limit: ${SCAN_DEFAULT_SCAN_LIMIT:1000}
+  max-scan-limit: ${SCAN_MAX_SCAN_LIMIT:10000}
+  default-chunk: ${SCAN_DEFAULT_CHUNK:25}
+  max-inflight: ${SCAN_MAX_INFLIGHT:1000}
+  max-pages-per-fire: ${SCAN_MAX_PAGES_PER_FIRE:50}
+
+class1:
+  default-limit: ${CLASS1_DEFAULT_LIMIT:10000}
+  max-limit: ${CLASS1_MAX_LIMIT:100000}
+
+group:
+  sweep-interval: ${GROUP_SWEEP_INTERVAL:30s}
+  sweep-initial-delay: ${GROUP_SWEEP_INITIAL_DELAY:15s}
+  sweep-batch: ${GROUP_SWEEP_BATCH:500}
+  max-inflight: ${GROUP_MAX_INFLIGHT:0}
+  eviction-cron: ${GROUP_EVICTION_CRON:0 30 3 * * *}
+  eviction-margin: ${GROUP_EVICTION_MARGIN:7d}
+  default-idle: ${GROUP_DEFAULT_IDLE:10m}
+  fetch-limit: ${GROUP_FETCH_LIMIT:200}
+  input-token-budget: ${GROUP_INPUT_TOKEN_BUDGET:60000}
+  scan-cadence: ${GROUP_SCAN_CADENCE:1m}
+
+observability:
+  execution-trace:
+    enabled: ${EXECUTION_TRACE_ENABLED:true}
+  log-levels:
+    path: ${LOG_CONFIG_PATH:/app/log-config/logging.levels.json}
+    interval: ${LOG_CONFIG_INTERVAL:10s}
+  status-report:
+    interval: ${STATUS_REPORT_INTERVAL:5m}
+
+logging:
+  level:
+    com.epam.aidial.enrichment: ${APP_LOG_LEVEL:INFO}

@@ -1,0 +1,17 @@
+-- Record which pipeline a name's scan cursor belongs to, so a pipeline recreated under the same name starts empty.
+--
+-- ADAS identifies a pipeline by name, and a delete followed by a create under that name (a catalog import, or a
+-- plain DELETE + POST) is a different pipeline. Every runner-state table is keyed on the name alone, so without
+-- this the new pipeline resumes the old one's scan position against an empty target and silently skips history.
+-- `generation` cannot tell the two apart: it restarts at 1 and climbs back to the old value after a patch or two.
+-- ADAS's `created_at` can, because ADAS sets it once at registration and never changes it.
+--
+-- The sync owns the column: it fills a NULL with the feed's value (adoption, with no reset) and, when the feed reports
+-- a different value, resets the name's cursor, group state, queued work and active backfills in one transaction. A
+-- cursor commit only stamps it on a row it inserts itself, and otherwise only reads it, to refuse a page scanned for
+-- the pipeline that was just reset.
+--
+-- Nullable and with no backfill: every existing row is adopted on the first sync after deploy, so nothing is
+-- discarded or re-derived. The previous image does not map the column, so a rolling-update overlap leaves it alone.
+--
+ALTER TABLE pipeline_cursor ADD COLUMN pipeline_created_at TIMESTAMPTZ;
