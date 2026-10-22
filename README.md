@@ -1,12 +1,11 @@
-# Analytics Enrichment Runner
+# DIAL Analytics Enrichment Runner
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 ![Java](https://img.shields.io/badge/Java-25-orange)
 ![Spring Boot](https://img.shields.io/badge/Spring_Boot-4.x-brightgreen)
 
 A standalone Spring Boot / Java service that runs enrichments for DIAL
-Analytics 2.0. It incrementally scans ADAS ([Analytics Data Access
-Service](https://github.com/epam/ai-dial-analytics))
+Analytics. It incrementally scans ADAS ([DIAL Analytics](https://github.com/epam/ai-dial-analytics))
 source tables, calls DIAL Core LLMs to derive per-row labels (topic / sentiment / language, …),
 and writes the results back to ADAS-managed ClickHouse **enrichment** side-tables (joined onto their
 source on a grain key at query time).

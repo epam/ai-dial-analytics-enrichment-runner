@@ -30,7 +30,8 @@ COPY --chown=appuser:appuser docker-entrypoint.sh /usr/local/bin/
 
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-USER appuser
+# Numeric, so a Kubernetes runAsNonRoot check can verify the user without reading /etc/passwd
+USER 1001
 
 EXPOSE 5000
 

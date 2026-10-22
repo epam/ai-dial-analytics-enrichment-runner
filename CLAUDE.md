@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-The **Analytics Enrichment Runner** — a standalone service that runs enrichment for DIAL Analytics 2.0.
+The **Analytics Enrichment Runner** — a standalone service that runs enrichment for DIAL Analytics.
 It incrementally scans ADAS (analytics-data-access-service) source tables via ADAS's pipeline-scoped
 endpoints and writes results back to ADAS-managed ClickHouse enrichment side-tables. Each pipeline runs in
 one of three lanes: **row × LLM** (one model call per row), **group × LLM** (one call per group key, fired

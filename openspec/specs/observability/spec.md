@@ -20,6 +20,9 @@ and `/actuator/health/readiness` as its probe groups, and the three SHALL NOT be
   reports DOWN until the first pipeline sync succeeds, which makes it unsuitable for a liveness probe: a
   dependency that has not warmed up yet is indistinguishable from a dead process.
 
+Both probe groups SHALL be served on the HTTP port whether or not the service runs in Kubernetes, SHALL be
+reachable without a credential in every security mode, and SHALL answer `200` when `UP` and `503` otherwise.
+
 The container image SHALL health-check the **liveness** probe. Documentation and smoke-test instructions
 SHALL NOT present the aggregate endpoint as reporting `UP` on a freshly started instance, because it does
 not, and following that instruction produces a restart loop.

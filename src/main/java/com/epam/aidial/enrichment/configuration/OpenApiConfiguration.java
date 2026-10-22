@@ -40,8 +40,8 @@ public class OpenApiConfiguration {
     public OpenAPI runnerOpenApi() {
         return new OpenAPI()
                 .info(new Info()
-                        .title("Analytics Enrichment Runner API")
-                        .description("Runs enrichment for DIAL Analytics 2.0 over ADAS-managed source and side-tables.")
+                        .title("DIAL Analytics Enrichment Runner API")
+                        .description("Runs enrichment for DIAL Analytics over ADAS-managed source and side-tables.")
                         .version("v1"))
                 .components(new Components()
                         .addSecuritySchemes(API_KEY_SCHEME, new SecurityScheme()

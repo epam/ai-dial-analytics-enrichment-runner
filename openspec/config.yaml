@@ -5,7 +5,7 @@ context: |
   # Analytics Enrichment Runner — Project Conventions
 
   ## What this is
-  A standalone Spring Boot / Java service running Class-2 (ML/LLM) enrichment for DIAL Analytics 2.0.
+  A standalone Spring Boot / Java service running Class-2 (ML/LLM) enrichment for DIAL Analytics.
   It incrementally scans ADAS (analytics-data-access-service) source tables via ADAS's pipeline-scoped
   endpoints, calls DIAL Core LLMs to derive per-row labels, and writes results back to ADAS-managed
   ClickHouse enrichment side-tables. The runner holds NO definitions and NO ClickHouse connection —
