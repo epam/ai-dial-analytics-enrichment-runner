@@ -57,8 +57,20 @@ class PipelineStatusResolverTest {
     }
 
     @Test
+    void stoppedWinsOverEverythingAndReadsNoGate() {
+        Pause pause = new Pause(PauseOrigin.BREAKER, "40/50 dead-lettered", STARTED, null);
+        when(pauseRegistry.current("r1")).thenReturn(Optional.of(pause));
+        when(compatibilityState.isCompatible()).thenReturn(false);
+
+        Status status = resolver.resolve(TestPipelines.stopped(pipeline), null, 600L, NOW);
+
+        assertThat(status).isEqualTo(new Status(State.STOPPED, false, null, null));
+        verifyNoInteractions(compatibilityState, spendPauseGate, backpressureGate, scheduleFactory);
+    }
+
+    @Test
     void pausedWinsAndReadsNoGate() {
-        Pause pause = new Pause(PauseOrigin.OPERATOR, "maintenance", STARTED, null);
+        Pause pause = new Pause(PauseOrigin.BREAKER, "40/50 dead-lettered", STARTED, null);
         when(pauseRegistry.current("r1")).thenReturn(Optional.of(pause));
         when(compatibilityState.isCompatible()).thenReturn(false);
 

@@ -75,7 +75,7 @@ context: |
   or 503 carries it and stays an ordinary failure). All five of the runner's call sites lie under that
   prefix; a sixth added elsewhere would receive NO echo and read as a skew, so adding one is a change to
   BOTH halves of the contract.
-  - Pipeline sync: GET /v1/pipelines?kind=enrich&enabled=true&view=compiled[&updated_since] -> the
+  - Pipeline sync: GET /v1/pipelines?kind=enrich&view=compiled[&updated_since] -> the
     ENVELOPE {"pipelines":[...]}, not a bare array (NO ETag/304); client-side `generation` diff drives
     PipelineCache + recurring-task reconciliation. `kind=enrich` is load-bearing: the registry also holds
     `aggregate` pipelines ADAS runs itself. `view=compiled` is MANDATORY: the default is view=source, the

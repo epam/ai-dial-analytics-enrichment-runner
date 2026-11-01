@@ -150,8 +150,8 @@ stored per group. Every condition SHALL be applied in the selection itself rathe
 afterwards, so an ineligible group cannot consume the pass's budget and crowd out an eligible one. Readiness
 SHALL NOT override dirtiness or the budget: a clean group is never enqueued however it signalled, and a
 signalled group at its ceiling stays blocked. Each pass SHALL be bounded by a configured batch size so a
-large dirty backlog cannot monopolise one pass, and SHALL honour the same pipeline-lifecycle, pause and spend
-gates as the scan. Time SHALL be read through an injected clock.
+large dirty backlog cannot monopolise one pass, and SHALL honour the same pipeline-lifecycle (absent or stopped), pause
+and spend gates as the scan. Time SHALL be read through an injected clock.
 
 A pass SHALL be bounded a second time, by a **depth ceiling** on how much work the pipeline may have
 pending at once. The sweep SHALL enqueue at most the difference between that ceiling and the pipeline's
@@ -249,6 +249,13 @@ otherwise, and they call for opposite responses.
 - **WHEN** the sweep runs
 - **THEN** those items count toward the depth ceiling, so the sweep does not enqueue fresh compute on top
   of a write backlog
+
+#### Scenario: A stopped group pipeline is not swept
+
+- **GIVEN** a group pipeline with dirty, ready groups, cached as stopped
+- **WHEN** the readiness sweep runs
+- **THEN** no group work item is enqueued for it, and its groups stay dirty for the first pass after it is
+  re-enabled
 
 ### Requirement: Deterministic group work-item identity
 

@@ -1,7 +1,7 @@
 package com.epam.aidial.enrichment.web.controller;
 
+import com.epam.aidial.enrichment.exception.PipelineNotPausedException;
 import com.epam.aidial.enrichment.observability.OperatorActionLog;
-import com.epam.aidial.enrichment.pause.PauseOrigin;
 import com.epam.aidial.enrichment.pause.PipelinePauseRegistry;
 import com.epam.aidial.enrichment.sync.PipelineCache;
 import com.epam.aidial.enrichment.web.dto.admin.PausedPipelineDto;
@@ -20,7 +20,12 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.Comparator;
 import java.util.Locale;
 
-/** Ops API to pause/resume a pipeline's enqueue (recovery after the DLQ circuit breaker auto-pauses). */
+/**
+ * Ops API over this runner's view of the pipelines: the synced cache, the DLQ circuit breaker's pauses, and an early
+ * lift of one. There is no pause: a pipeline is stopped and started through ADAS's {@code enabled} flag, its single
+ * run control, which the runner follows. The resume only lifts a breaker pause, so it cannot stop anything and is not
+ * a second switch.
+ */
 @RestController
 @RequestMapping("/v1/pipelines")
 @RequiredArgsConstructor
@@ -35,19 +40,16 @@ public class PipelineAdminController {
         return pipelineCacheMapper.toResponse(pipelineCache.getAll());
     }
 
-    @PostMapping("/{name}/pause")
-    @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void pause(@PathVariable String name) {
-        // An operator pause never expires: it is a decision taken with knowledge the runner does not have,
-        // and must survive anything the runner concludes. Only a breaker pause lifts itself.
-        pauseRegistry.pause(name, PauseOrigin.OPERATOR, "paused by an operator");
-        OperatorActionLog.record("pipeline_pause", name, null);
-    }
-
+    /**
+     * Lifts the breaker's pause before its window elapses — after an upstream was fixed, or where expiry is
+     * configured off. A pipeline the breaker has not paused is a {@code 409}, not a silent success.
+     */
     @PostMapping("/{name}/resume")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void resume(@PathVariable String name) {
-        pauseRegistry.resume(name);
+        if (!pauseRegistry.resume(name)) {
+            throw new PipelineNotPausedException(name);
+        }
         OperatorActionLog.record("pipeline_resume", name, null);
     }
 

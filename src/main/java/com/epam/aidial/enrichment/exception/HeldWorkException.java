@@ -7,7 +7,7 @@ package com.epam.aidial.enrichment.exception;
  * {@link com.epam.aidial.enrichment.worker.WorkHold}, which is where that treatment is defined once so the
  * three work lanes cannot disagree about what "held" means.
  *
- * <p>Two cases today, and they are why this is a base type rather than a single exception — the
+ * <p>Three cases today, and they are why this is a base type rather than a single exception — the
  * distinction it draws is the useful one: a condition the runner is waiting out, as opposed to a failure
  * it is retrying.
  *
@@ -16,6 +16,8 @@ package com.epam.aidial.enrichment.exception;
  *       the first successful poll clears;</li>
  *   <li>{@link AdasContractException} — ADAS is on the other side of a contract version bump, which the
  *       matching deploy clears. An upstream the runner has decided it must not talk to.</li>
+ *   <li>{@link PipelineStoppedHoldException} — the item's pipeline is stopped in ADAS, which re-enabling it
+ *       clears.</li>
  * </ul>
  *
  * <p>Any later condition of that kind belongs on the same arm rather than on a second copy of it; a second

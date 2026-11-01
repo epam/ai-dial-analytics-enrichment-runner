@@ -18,7 +18,7 @@ from the source start. The scan HTTP call SHALL have no local side effects (it p
 to repeat). How a page is turned into committed work SHALL depend on the pipeline's trigger kind: a row-grain
 pipeline's page becomes chunk work items, and a group pipeline's page becomes per-group state — the drain loop,
 budget, gates and cursor handling are identical for both. After each committed page the runner SHALL
-re-evaluate the pause, spend-budget, and backpressure gates and stop the drain early when any trips (so a
+re-evaluate the stop, pause, spend-budget, and backpressure gates and stop the drain early when any trips (so a
 mid-fire trip stops within one page, not one whole fire). The runner SHALL also stop the drain when a page
 reports `has_more` but does not advance the cursor (an unchanged, absent or blank next cursor), rather than
 re-scanning the same range or restarting from the source.
@@ -36,7 +36,8 @@ cursor it holds when the response carries no new position.
 
 #### Scenario: A mid-drain gate trip stops the fire
 
-- **GIVEN** a multi-page drain where a page causes the pipeline to become paused, over budget, or backpressured
+- **GIVEN** a multi-page drain where a page causes the pipeline to become paused, over budget, or backpressured,
+  or a sync caches the pipeline as stopped mid-drain
 - **WHEN** the next page would be scanned
 - **THEN** the drain stops without scanning or enqueuing further pages in that fire
 
@@ -216,9 +217,9 @@ schedule comes from the trigger (see pipeline-sync, "Recurring task reconciliati
 
 ### Requirement: Backpressure and pipeline-lifecycle guard
 
-The runner SHALL skip a scan fire entirely (no scan, no enqueue, no cursor advance) when the pipeline is
-no longer present in the pipeline cache, or when the pipeline's in-flight (pending + delayed) work depth
-exceeds `scan.max-inflight`.
+The runner SHALL skip a scan fire entirely (no scan, no enqueue, no cursor advance) when the pipeline is no longer
+present in the pipeline cache, when it is cached as stopped, or when the pipeline's in-flight (pending + delayed)
+work depth exceeds `scan.max-inflight`.
 
 Depth SHALL be counted over **every** work-item task a pipeline's ids are prefixed onto — the row chunk, the
 group item and the write — not the chunk alone. Counting one of them would report a pipeline whose writes are
@@ -240,6 +241,11 @@ readiness sweep SHALL apply the same gate, since it, and not the dirty-mark, is 
 
 - **WHEN** a scan fires for a pipeline absent from the cache
 - **THEN** nothing is scanned, enqueued, or advanced
+
+#### Scenario: A stopped pipeline does not scan
+
+- **WHEN** a scan fires for a pipeline cached as stopped, before the sync's cancellation of its instance lands
+- **THEN** nothing is scanned, enqueued, or advanced, and its stored cursor is kept for the restart
 
 #### Scenario: An underscore in a pipeline name does not broaden the depth count
 
@@ -351,3 +357,4 @@ nothing at all never reaches it.
 
 - **WHEN** a scan returns no rows
 - **THEN** the commit behaves exactly as it does today, since there is nothing to account for
+

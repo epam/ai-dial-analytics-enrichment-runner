@@ -296,12 +296,14 @@ re-check drops computed rows for any declaration edit, including a pure executio
 
 Before writing, the runner SHALL drop a work item whose pipeline's currently-served `generation` differs
 from the `generation` it was built against, and SHALL drop a **pre-compute** item whose pipeline is no
-longer present in the cache (disabled/deleted).
+longer present in the cache (deleted, no longer served by ADAS, or refused by the runner). It SHALL instead **hold**
+an item of any phase whose pipeline is cached as **stopped**.
 
 `generation` bumps on **any** declaration change — prompt, filter, trigger, `cadence`, `rate_rpm`,
-`batch_scan_limit` — so a work item is dropped even across a pure execution-knob edit, costing a re-derivation on the row and group lanes and an
-archived paid-for result on the write lane, for an edit that changed nothing about how the label is
-computed.
+`batch_scan_limit` — so a work item is dropped even across a pure execution-knob edit, costing a re-derivation on
+the row and group lanes and an archived paid-for result on the write lane, for an edit that changed nothing about
+how the label is computed. It does **not** bump on a change of `enabled` alone, so stopping and restarting a
+pipeline leaves its held items current.
 
 A work item SHALL distinguish a pipeline cache that is **populated and does not hold this pipeline** from one
 that has **never been populated**. Only the first is an answer. The second means the process has not yet
@@ -329,9 +331,31 @@ already paid for whose only copy is that payload; dropping it destroys the work 
 and no later sweep recreates it. A requeue then re-attempts the write once the pipeline is back, without
 recomputing anything.
 
-The runner SHALL NOT distinguish a disabled pipeline from a deleted one at this point, because ADAS's pipeline feed
-omits both identically — which is precisely why the post-compute item must be preserved: the far more common
-cause is a pause, and a pause SHALL NOT destroy computed work.
+A work item whose pipeline is cached as **stopped** — disabled in ADAS, the pipeline's single run control — SHALL
+be **held** on every lane, chunk, group and write alike, under the same definition of held the cold cache uses:
+rescheduled after the fixed hold delay without consuming an attempt, never archived and never dropped, with no
+model call and no write while it is held. It SHALL run normally once a sync caches the pipeline as active again.
+Holding rather than dropping is the point of a stop: the scan cursor advanced when the chunk was enqueued, so a
+dropped chunk is a set of rows nothing revisits, and a dropped write is a paid result lost. The stop SHALL be
+checked before the model call and checked again before the write, as the absent-pipeline check is. The
+stale-declaration guard still applies to a held item once it runs: a declaration re-declared while the pipeline
+was stopped moves `generation`, and the item is then dropped or archived as any stale item is.
+
+A stop is observed at the runner's next sync, not when ADAS records it. An item whose model call began before the
+sync landed may reach ADAS after the pipeline was disabled, and ADAS refuses that write with HTTP 409
+`pipeline_conflict` — on the pipeline-scoped write paths that code means only that the pipeline is disabled. The
+write lane SHALL **hold** such an item, exactly as it holds one whose pipeline is cached as stopped: it SHALL NOT be
+dead-lettered, SHALL NOT stamp its group and SHALL NOT count against the DLQ circuit breaker. The refusal is the
+stop arriving ahead of the sync, not a rejection of the rows; dead-lettering it would lose the paid result to a
+manual requeue, stamping the group would mark an unwritten label clean, and counting it — every row of the write
+at once — would let an operator's stop trip the breaker. Once the sync lands the item is held as stopped work, and
+it writes after the pipeline is re-enabled. Every item still queued when the sync lands is held the same way.
+
+A disabled pipeline does not reach this point: the runner reads the unfiltered feed, so a disabled pipeline stays
+cached as stopped and its work is held. Absence here means the pipeline was deleted, ADAS no longer serves it, or
+the runner refused it. The post-compute item is still archived rather than dropped, because a refused pipeline
+can be admitted again once its declaration is fixed, and a paid result SHALL NOT be destroyed on a verdict the
+runner can revisit.
 
 Archiving for this cause SHALL NOT stamp the group and SHALL NOT count against the DLQ circuit breaker,
 unlike a write ADAS permanently rejects. The write never reached ADAS, so nothing about the group's
@@ -342,11 +366,11 @@ A stale-declaration upsert item SHALL still be dropped rather than archived: its
 a superseded `generation` and must never be written, so preserving them would preserve a result that is
 no longer valid.
 
-A work item whose payload carries a **pipeline generation of `0`** SHALL be treated as a distinct
-**pre-fold** case on every lane, and SHALL NOT be dropped by the stale-declaration guard. `0` is the value
-a legacy item deserializes to: its payload names `evaluatorVersion` rather than `pipelineGeneration`, and
-the job scheduler's serializer ignores unknown properties rather than failing on them, so the retired member is discarded and the new one left at its default. `0` is never a
-generation ADAS serves, so the reading is unambiguous.
+A work item whose payload carries a **pipeline generation of `0`** SHALL be treated as a distinct **pre-fold** case
+on every lane, and SHALL NOT be dropped by the stale-declaration guard. `0` is the value a legacy item deserializes
+to: its payload names `evaluatorVersion` rather than `pipelineGeneration`, and the job scheduler's serializer
+ignores unknown properties rather than failing on them, so the retired member is discarded and the new one left at
+its default. `0` is never a generation ADAS serves, so the reading is unambiguous.
 
 Such an item SHALL be **tolerated rather than dead-lettered**, and SHALL NOT write a `dlq_item` row on any
 lane. The runner SHALL NOT require the work queue to have been drained before the cut-over: a drain would
@@ -435,17 +459,17 @@ window elapses.
 - **THEN** no DIAL call is made and no spend is recorded, and the row is dead-lettered at `input_map`
   naming the placeholder, stamped with the adopted generation rather than `0`
 
-#### Scenario: A computed write survives its pipeline being disabled mid-flight
+#### Scenario: A computed write survives its pipeline leaving the cache mid-flight
 
-- **GIVEN** an upsert item holding a computed label, and its pipeline disabled in ADAS before the write executes
-  (so the runner has evicted it from the cache)
+- **GIVEN** an upsert item holding a computed label, and its pipeline deleted in ADAS or refused by the runner
+  before the write executes (so the runner has evicted it from the cache)
 - **WHEN** the write item runs
 - **THEN** the item is archived to the DLQ with its payload and `upsert-rows` task name, nothing is written to
   ADAS, the group's `computed_version` is unchanged, and the pipeline is not paused
 
 #### Scenario: The archived write is recoverable without a model call
 
-- **GIVEN** such an archived item and the pipeline enabled again
+- **GIVEN** such an archived item and the pipeline back in the cache
 - **WHEN** the item is requeued
 - **THEN** the stored rows are re-posted to ADAS and no model call is made
 
@@ -473,6 +497,35 @@ window elapses.
 - **GIVEN** chunks enqueued by a scan whose cursor has already advanced past their rows
 - **WHEN** the process restarts and those chunks become due before the first sync
 - **THEN** they are held and later enriched, rather than dropped for rows no cursor will read again
+
+#### Scenario: Work of a stopped pipeline is held, not dropped
+
+- **GIVEN** chunk, group and write items queued for a pipeline that a sync has cached as stopped
+- **WHEN** each becomes due
+- **THEN** none is dropped, archived, or counted as a failed attempt, no DIAL call and no ADAS write is made, and
+  each remains queued
+
+#### Scenario: A write refused because the stop has not been synced yet is held
+
+- **GIVEN** an upsert item holding a computed label, whose pipeline was disabled in ADAS after its model call and
+  before the runner's next sync
+- **WHEN** the write executes and ADAS answers HTTP 409 `pipeline_conflict`
+- **THEN** the item is held without consuming an attempt, nothing is dead-lettered, its group is not stamped, the
+  DLQ circuit breaker records nothing, and the write lands once the pipeline is re-enabled
+
+#### Scenario: Held work of a stopped pipeline runs once it is re-enabled
+
+- **GIVEN** such held items, built at the pipeline's current `generation`
+- **WHEN** the pipeline is re-enabled in ADAS, which leaves its `generation` unchanged, and a sync caches it as
+  active
+- **THEN** each item executes normally with its full attempt budget, and no chunk is dropped as stale
+
+#### Scenario: A re-declaration while stopped still makes held work stale
+
+- **GIVEN** a chunk held for a stopped pipeline at generation 4, and the pipeline re-declared at generation 5
+  while stopped
+- **WHEN** the pipeline is re-enabled and the chunk becomes due
+- **THEN** the chunk is dropped by the stale-declaration guard without calling DIAL or upserting
 
 ### Requirement: Write-back outranks compute in the work queue
 
@@ -678,3 +731,4 @@ static check can see.
 - **WHEN** the template is rendered
 - **THEN** the value is substituted verbatim and the item proceeds, because the check reads the template
   rather than the rendered body
+

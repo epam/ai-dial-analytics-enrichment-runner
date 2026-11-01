@@ -11,9 +11,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * In-memory cache of the enabled pipelines synced from ADAS, keyed by pipeline name. It is the runner's local
- * source of truth for a pipeline's currently-served declaration — the worker's stale-declaration guard reads
- * its {@code generation} before upsert. Populated by {@link PipelineSyncService} on each poll.
+ * In-memory cache of the pipelines synced from ADAS, keyed by pipeline name, each <b>active</b> or
+ * <b>stopped</b> as its {@code enabled} flag says. It is the runner's local source of truth for a pipeline's
+ * currently-served declaration — the worker's stale-declaration guard reads its {@code generation} before
+ * upsert — and for whether it may run. Populated by {@link PipelineSyncService} on each poll.
+ *
+ * <p>A stopped pipeline is cached rather than dropped because ADAS's {@code enabled} flag is the pipeline's single
+ * run control: its queued work is held, not discarded, and a pipeline <em>absent</em> from the cache is one ADAS
+ * no longer serves (deleted, or unservable) or the runner refused. See {@link #isStopped}.
  *
  * <p>The whole map is published via a single atomic reference swap, so every read observes a
  * consistent snapshot (never a half-applied reconcile) with no torn-view window.
@@ -48,6 +53,21 @@ public class PipelineCache {
         return pipelines.get().size();
     }
 
+    /**
+     * Whether the pipeline is cached as <b>stopped</b> — synced with {@code enabled: false}. Read fresh on every call,
+     * so a drain that re-asks between pages sees a stop the moment a sync publishes it. A pipeline absent from the
+     * cache is not stopped: absence keeps its own treatment.
+     */
+    public boolean isStopped(String pipelineName) {
+        PipelineDto pipeline = get(pipelineName);
+        return pipeline != null && !pipeline.enabled();
+    }
+
+    /** How many cached pipelines are stopped. Read by a gauge on every scrape. */
+    public int stoppedCount() {
+        return (int) pipelines.get().values().stream().filter(pipeline -> !pipeline.enabled()).count();
+    }
+
     /** Whether the registry has been synced at least once in this process. */
     public boolean isPopulated() {
         return populated.get();
@@ -55,7 +75,7 @@ public class PipelineCache {
 
     /**
      * Refuses a work item that became due before this process had ever synced the registry, so the caller
-     * holds it rather than reading its own ignorance as "the pipeline is disabled or deleted".
+     * holds it rather than reading its own ignorance as "the pipeline is deleted or refused".
      *
      * <p>The distinction is load-bearing per lane: a chunk dropped here is irreversible, because the scan
      * cursor advanced in the same transaction that enqueued it; a group item dropped here costs a

@@ -9,6 +9,7 @@ import com.epam.aidial.enrichment.exception.DlqNotRequeueableException;
 import com.epam.aidial.enrichment.exception.InvalidCursorException;
 import com.epam.aidial.enrichment.exception.PipelineCacheNotReadyException;
 import com.epam.aidial.enrichment.exception.PipelineNotFoundException;
+import com.epam.aidial.enrichment.exception.PipelineNotPausedException;
 import com.epam.aidial.enrichment.exception.UnknownEnumValueException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
@@ -131,6 +132,12 @@ public class DefaultExceptionHandler {
     @ExceptionHandler(PipelineNotFoundException.class)
     public ErrorView handlePipelineNotFound(HttpServletRequest req, PipelineNotFoundException ex) {
         return new ErrorView(req, HttpStatus.NOT_FOUND, "not_found", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.CONFLICT)
+    @ExceptionHandler(PipelineNotPausedException.class)
+    public ErrorView handlePipelineNotPaused(HttpServletRequest req, PipelineNotPausedException ex) {
+        return new ErrorView(req, HttpStatus.CONFLICT, "pipeline_not_paused", ex.getMessage());
     }
 
     @ResponseStatus(HttpStatus.CONFLICT)

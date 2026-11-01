@@ -11,9 +11,10 @@ import java.util.Locale;
  * exactly this set.
  *
  * <p>One word is not an answer: the conditions call for materially different operator responses. The condition
- * behind a spend pause lifts at 00:00 UTC; behind a breaker pause when its window elapses; behind an operator's
- * pipeline pause when a human decides; behind a {@link #CURSOR_STALLED cursor stall} only when somebody fixes
- * something. In every case it is the <em>condition</em> that lifts — the run stays paused until it is resumed.
+ * behind a spend pause lifts at 00:00 UTC; behind a breaker pause when its window elapses; behind a
+ * {@link #PIPELINE_STOPPED stopped pipeline} when somebody re-enables it in ADAS; behind a
+ * {@link #CURSOR_STALLED cursor stall} only when somebody fixes something. In every case it is the
+ * <em>condition</em> that lifts — the run stays paused until it is resumed.
  *
  * <p>The value records what <strong>paused</strong> the run, not what holds it now. The start and resume gates
  * answer the second question.
@@ -24,14 +25,21 @@ public enum BackfillPauseReason {
     OPERATOR,
 
     /**
-     * The run's pipeline was paused by an operator. Kept apart from {@link #PIPELINE_PAUSED_BREAKER} because the
-     * runner knows the origin at pause time while the in-memory pause registry forgets it on restart — and the
-     * two call for different responses: a breaker pause's condition expires by itself, an operator's does not.
+     * The run's pipeline was paused by an operator through the runner's own pause, which no longer exists: a
+     * pipeline is stopped in ADAS now, recorded as {@link #PIPELINE_STOPPED}. Never written; kept so a run paused
+     * before that change still reads back, and so the database constraint and this set stay one list.
      */
     PIPELINE_PAUSED_OPERATOR,
 
-    /** The run's pipeline was paused by the DLQ circuit breaker. See {@link #PIPELINE_PAUSED_OPERATOR}. */
+    /** The run's pipeline was paused by the DLQ circuit breaker; the condition lifts when its window elapses. */
     PIPELINE_PAUSED_BREAKER,
+
+    /**
+     * The run's pipeline is stopped — disabled in ADAS, its single run control. Kept apart from
+     * {@link #PIPELINE_ABSENT}: a stopped pipeline is still cached and still runs once re-enabled, so its run is
+     * resumable then, where an absent one's answers {@code 404} until the pipeline is back.
+     */
+    PIPELINE_STOPPED,
 
     /** The pipeline's daily spend budget was exhausted; the budget resets at 00:00 UTC. */
     SPEND_BUDGET_EXHAUSTED,
@@ -43,8 +51,9 @@ public enum BackfillPauseReason {
     CURSOR_STALLED,
 
     /**
-     * The pipeline was absent from a populated pipeline cache: disabled or deleted in ADAS, <strong>or refused by
-     * the runner as unexecutable</strong>, which also keeps a pipeline out of the cache.
+     * The pipeline was absent from a populated pipeline cache: deleted in ADAS or no longer served by it, <strong>or
+     * refused by the runner as unexecutable</strong>, which also keeps a pipeline out of the cache. A disabled
+     * pipeline is not absent: it is {@link #PIPELINE_STOPPED}.
      */
     PIPELINE_ABSENT,
 

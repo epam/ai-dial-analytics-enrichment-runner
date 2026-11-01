@@ -56,18 +56,21 @@ import java.util.stream.Collectors;
  * db-scheduler recurring tasks.
  *
  * <p>The sync feed has no ETag/304, so the runner polls the full list and diffs client-side on each
- * pipeline's {@code generation}. For each enabled pipeline it creates a recurring instance under the task name
- * its {@code transform.type} selects — {@code class1-materialize} for a {@code sql} transform, {@code pipeline-scan}
- * otherwise — or reschedules it when the generation changed or the schedule the instance stores differs from the
- * derived one; pipelines that disappear from the feed
- * (disabled/deleted) have their instance cancelled. Because a pipeline can change lanes across a generation
+ * pipeline's {@code generation} and {@code enabled} flag, compared independently: ADAS does not move
+ * {@code generation} on a patch that only changes {@code enabled}. The feed is unfiltered, and {@code enabled} is
+ * the pipeline's single run control: a disabled pipeline is cached as <b>stopped</b>, keeping its persisted state
+ * and its held work, while one absent from the feed is deleted or unservable. For each <em>active</em> pipeline it
+ * creates a recurring instance under the task name its {@code transform.type} selects — {@code class1-materialize}
+ * for a {@code sql} transform, {@code pipeline-scan} otherwise — or reschedules it when the generation changed or the
+ * schedule the instance stores differs from the derived one; a stopped pipeline, and one that disappears from the
+ * feed, has its instance cancelled. Because a pipeline can change lanes across a generation
  * bump, reconciliation sweeps every task name pipelines can be scheduled onto. A name deleted and recreated in ADAS is
  * detected by its new {@code created_at}, and the state the runner holds under the name is reset first (see
  * {@link #resetRecreated}).
  *
- * <p>Because the poll fetches the <em>full</em> enabled-pipeline list (never an incremental delta), a
- * successful empty response legitimately means "zero enabled pipelines" — including the case of disabling
- * or deleting the last remaining pipeline — and reconciles to empty (all tasks cancelled, cache cleared).
+ * <p>Because the poll fetches the <em>full</em> pipeline list (never an incremental delta), a successful empty
+ * response legitimately means "zero pipelines" — the case of deleting the last remaining pipeline — and
+ * reconciles to empty (all tasks cancelled, cache cleared).
  * It takes <strong>two consecutive</strong> such polls, though: see {@link #reconcile}.
  * A <em>failed</em> poll is a different signal: {@link #sync()} catches the exception and returns
  * before {@code reconcile} runs, leaving the current cache and tasks untouched, so a transient ADAS
@@ -210,7 +213,7 @@ public class PipelineSyncService {
     /**
      * Reconciles recurring tasks + cache against the fetched pipeline list. Package-visible for tests.
      *
-     * <p>An empty feed stays authoritative — a real "the last pipeline was disabled" must still cancel its
+     * <p>An empty feed stays authoritative — a real "the last pipeline was deleted" must still cancel its
      * tasks — but it takes a <strong>confirming</strong> poll, costing one poll interval. The first,
      * unconfirmed one logs, meters, and returns having changed nothing else.
      *
@@ -221,10 +224,9 @@ public class PipelineSyncService {
      * that is not an error.
      */
     void reconcile(List<PipelineDto> pipelines) {
-        // Poll failures never reach here — sync() catches them and returns, keeping the cache and tasks. The
-        // !enabled() skip in admit() below is kept even so: it is what makes reconcile() correct for any
-        // caller, independent of which filter the fetch happened to send, and it is the one place a disabled
-        // pipeline is refused a task.
+        // Poll failures never reach here — sync() catches them and returns, keeping the cache and tasks. A
+        // disabled pipeline is admitted and cached as stopped; only the scheduling loop below asks `enabled`, and
+        // it is the one place a stopped pipeline is refused a task.
         if (pipelines.isEmpty()) {
             // Counted on every empty poll, the unconfirmed one included: it is the only trace of a feed that
             // said "no pipelines" and was not acted on.
@@ -241,8 +243,8 @@ public class PipelineSyncService {
                 // Once, on the poll that confirms it — the `refusedGenerations` idiom again. A registry that
                 // is *steadily* empty reconciles to empty on every subsequent poll too, and a WARN repeated
                 // every poll interval for a state an operator chose would bury the one that says it changed.
-                log.warn("Pipeline sync received {} consecutive empty feeds; reconciling to zero enabled "
-                        + "pipelines", consecutiveEmptyFeeds);
+                log.warn("Pipeline sync received {} consecutive empty feeds; reconciling to zero pipelines",
+                        consecutiveEmptyFeeds);
             }
         } else {
             consecutiveEmptyFeeds = 0;
@@ -269,6 +271,10 @@ public class PipelineSyncService {
         int cancelled = 0;
 
         for (PipelineDto pipeline : desired.values()) {
+            if (!pipeline.enabled()) {
+                // Stopped: nothing is scheduled, and the cancel sweep below removes an instance it still has.
+                continue;
+            }
             try {
                 String taskName = PipelineRouting.taskName(pipeline);
                 Schedule schedule = scheduleFactory.forPipeline(pipeline);
@@ -286,8 +292,13 @@ public class PipelineSyncService {
                         continue;
                     }
                     created++;
-                    log.info("Pipeline {} added: lane={} generation={}{}", pipeline.name(), PipelineRouting.lane(pipeline),
-                            generationChange(cached, pipeline), cached == null ? "" : " (moved from lane " + PipelineRouting.lane(cached) + ")");
+                    if (cached != null && !cached.enabled()) {
+                        log.info("Pipeline {} started: lane={} generation={}; its held work runs again", pipeline.name(),
+                                PipelineRouting.lane(pipeline), generationChange(cached, pipeline));
+                    } else {
+                        log.info("Pipeline {} added: lane={} generation={}{}", pipeline.name(), PipelineRouting.lane(pipeline),
+                                generationChange(cached, pipeline), cached == null ? "" : " (moved from lane " + PipelineRouting.lane(cached) + ")");
+                    }
                 } else {
                     // The stored schedule is what converges, because ADAS can rewrite a trigger without a bump (V44
                     // did), and an instance picked at one poll is simply compared again at the next. A restart alone
@@ -323,20 +334,23 @@ public class PipelineSyncService {
             }
         }
 
-        // Cancel an instance whose pipeline left the feed entirely, was refused by the admission gate, or is
-        // no longer routed to this task name — the last case is what migrates a type-changed pipeline.
+        // Cancel an instance whose pipeline left the feed entirely, was refused by the admission gate, is stopped,
+        // or is no longer routed to this task name — the last case is what migrates a type-changed pipeline.
         for (Map.Entry<String, Map<String, PlainScheduleAndData>> entry : current.entrySet()) {
             String taskName = entry.getKey();
             for (String instanceId : entry.getValue().keySet()) {
                 // The instance id of a recurring per-pipeline task is the pipeline name.
                 PipelineDto pipeline = desired.get(instanceId);
-                if (pipeline != null && PipelineRouting.taskName(pipeline).equals(taskName)) {
+                if (pipeline != null && pipeline.enabled() && PipelineRouting.taskName(pipeline).equals(taskName)) {
                     continue;
                 }
                 try {
                     scheduler.cancel(TaskInstanceId.of(taskName, instanceId));
                     cancelled++;
-                    if (pipeline == null) {
+                    if (pipeline != null && !pipeline.enabled()) {
+                        log.info("Pipeline {} stopped: lane={} generation={}; its queued work is held until it is re-enabled",
+                                instanceId, PipelineRouting.lane(pipeline), pipeline.generation());
+                    } else if (pipeline == null) {
                         // A lane migration is reported by the "added" line of the lane it moved to.
                         PipelineDto cached = cache.get(instanceId);
                         log.info("Pipeline {} removed: lane={} generation={}", instanceId,
@@ -351,12 +365,23 @@ public class PipelineSyncService {
         cache.replaceAll(desired);
         evictRemovedPipelines(previousPipelineNames, desired.keySet());
         runOutcome.retain(desired.keySet());
-        desired.keySet().forEach(name -> runnerMetrics.recordSpend(name, spendService.today(name).calls()));
+        int stopped = 0;
+        for (PipelineDto pipeline : desired.values()) {
+            if (pipeline.enabled()) {
+                runnerMetrics.recordSpend(pipeline.name(), spendService.today(pipeline.name()).calls());
+            } else {
+                // A stopped pipeline keeps its rate-limiter bucket, breaker counters and gate state for when it
+                // restarts, but not its per-pipeline gauges: nothing moves them while it is stopped, so a scan lag
+                // would only climb.
+                runnerMetrics.evictPipeline(pipeline.name());
+                stopped++;
+            }
+        }
         readinessState.markPipelineSyncSucceeded();
         // Every poll ends here; only one that changed something is worth an INFO line.
         log.atLevel(created + rescheduled + cancelled > 0 ? Level.INFO : Level.DEBUG)
-                .log("Pipeline sync: {} enabled pipelines ({} created, {} rescheduled, {} cancelled)",
-                        desired.size(), created, rescheduled, cancelled);
+                .log("Pipeline sync: {} pipelines, {} active and {} stopped ({} created, {} rescheduled, {} cancelled)",
+                        desired.size(), desired.size() - stopped, stopped, created, rescheduled, cancelled);
     }
 
     /**
@@ -377,19 +402,17 @@ public class PipelineSyncService {
     }
 
     /**
-     * Filters the feed down to the pipelines the runner can actually execute. A pipeline it cannot execute is
-     * refused here rather than cached and scheduled into repeated failure: caching it would make it look
-     * healthy in the ops introspection endpoint while every fire failed. The refusal is logged once per
-     * generation (the poll repeats every 30s) and published as a gauge.
+     * Filters the feed down to the pipelines the runner can actually execute, active or stopped alike. A pipeline it
+     * cannot execute is refused here rather than cached and scheduled into repeated failure: caching it would make
+     * it look healthy in the ops introspection endpoint while every fire failed. A stopped pipeline goes through the
+     * same gate, so one the runner could not run is absent rather than cached as merely stopped. The refusal is
+     * logged once per generation (the poll repeats every 30s) and published as a gauge.
      */
     private Map<String, PipelineDto> admit(List<PipelineDto> pipelines) {
         Map<String, PipelineDto> desired = new LinkedHashMap<>();
         Map<String, Long> refused = new HashMap<>();
         Map<String, Long> shortIdle = new HashMap<>();
         for (PipelineDto pipeline : pipelines) {
-            if (!pipeline.enabled()) {
-                continue;
-            }
             String reason = PipelineRouting.unsupportedReason(pipeline);
             if (reason == null) {
                 desired.put(pipeline.name(), pipeline);
@@ -451,7 +474,8 @@ public class PipelineSyncService {
      * Frees per-pipeline resources for pipelines that left the synced set: the rate limiter's bucket, the per-pipeline
      * metric gauges, the breaker's group-failure count and the gates' last reported transitions — each an in-memory
      * map keyed by pipeline name, which would otherwise retain an entry per pipeline the runner has ever seen, and
-     * hand a re-enabled pipeline the failure count or gate state it left behind.
+     * hand a re-created or re-admitted pipeline the failure count or gate state it left behind. A stopped pipeline
+     * stays in the synced set and keeps them.
      */
     private void evictRemovedPipelines(Set<String> previous, Set<String> desired) {
         for (String pipelineName : previous) {
@@ -528,10 +552,10 @@ public class PipelineSyncService {
                     // finds nothing left to compare, so this poll is the only one that can reschedule the instance.
                     recreated.add(name);
                     runnerMetrics.incrementPipelineStateResets();
-                    Optional<PipelinePauseRegistry.Pause> keptPause = resetInMemory(name);
+                    resetInMemory(name);
                     log.warn("Pipeline {} was recreated (created_at {} -> {}); runner state reset: cursor cleared, {} group(s) deleted, "
-                                    + "{} queued work item(s) deleted, {} backfill run(s) cancelled{}", name, persisted, createdAt,
-                            removed.get().groups(), removed.get().workItems(), removed.get().runsCancelled(), keptPause(keptPause));
+                                    + "{} queued work item(s) deleted, {} backfill run(s) cancelled", name, persisted, createdAt,
+                            removed.get().groups(), removed.get().workItems(), removed.get().runsCancelled());
                     continue;
                 }
                 // Not reset here, but this pod may still hold the deleted pipeline in memory: another pod reset the
@@ -539,9 +563,9 @@ public class PipelineSyncService {
                 // it handed over).
                 PipelineDto cached = cache.get(name);
                 if (cached != null && cached.createdAt() != null && !cached.createdAt().equals(createdAt)) {
-                    Optional<PipelinePauseRegistry.Pause> keptPause = resetInMemory(name);
+                    resetInMemory(name);
                     log.info("Pipeline {} was recreated (created_at {} -> {}) and its persisted state already reset; "
-                            + "in-memory state reset{}", name, cached.createdAt(), createdAt, keptPause(keptPause));
+                            + "in-memory state reset", name, cached.createdAt(), createdAt);
                 }
             } catch (RuntimeException e) {
                 log.warn("Recreated-pipeline check failed for pipeline {}; retrying next poll: {}", name,
@@ -562,19 +586,16 @@ public class PipelineSyncService {
         return lastWrite.isBefore(createdAt);
     }
 
-    private static String keptPause(Optional<PipelinePauseRegistry.Pause> pause) {
-        return pause.map(p -> "; operator pause kept (" + p.reason() + ")").orElse("");
-    }
-
     /**
      * Evicts what the runner holds in memory for a recreated pipeline, through the same path as a removal, plus the
-     * last fire outcome and last write it would otherwise report as the new pipeline's. A breaker pause is lifted;
-     * an operator pause is kept and returned.
+     * last fire outcome and last write it would otherwise report as the new pipeline's. A breaker pause is lifted:
+     * it was drawn from the deleted pipeline's failures and says nothing about the new one. Whether the new one runs
+     * is its own {@code enabled} flag.
      */
-    private Optional<PipelinePauseRegistry.Pause> resetInMemory(String pipelineName) {
+    private void resetInMemory(String pipelineName) {
         evict(pipelineName);
         runOutcome.forget(pipelineName);
         pipelineActivity.forget(pipelineName);
-        return pauseRegistry.clearBreakerPause(pipelineName);
+        pauseRegistry.resume(pipelineName);
     }
 }

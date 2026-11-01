@@ -4,9 +4,7 @@
 The service's own foundations: how it boots, the PostgreSQL runtime-state schema it owns and migrates, the
 stable error contract every failure returns, environment-driven configuration, and the sensitive-data identity
 posture and body-handling constraints it operates under.
-
 ## Requirements
-
 ### Requirement: Bootable service context
 
 The service SHALL start as a Spring Boot application with base package
@@ -45,7 +43,9 @@ reason column and a timestamp, so the condition survives the log line that annou
 restart — which the in-memory pipeline-pause registry does not. The reason column SHALL stay
 `CHECK`-constrained for the reason `dlq_item.stage` is: an unrecognised value is then a database error rather
 than a stored typo; and a second constraint SHALL require the reason and its timestamp to be present
-together or not at all. That a reason appears only on a `paused` run is enforced by the runner's transitions
+together or not at all. The reason set SHALL admit `pipeline_stopped`, added by a forward migration that widens the
+constraint, and SHALL keep admitting `pipeline_paused_operator`, which rows written before the operator pause was
+removed may carry. That a reason appears only on a `paused` run is enforced by the runner's transitions
 in this release; the constraint that makes it a database rule SHALL follow once no deployable image predates
 it, because an older image's resume and cancel cannot clear a column they do not map. `run_history` SHALL also
 carry the reason its **last batch failed** and when, so a run that has stopped making progress is
@@ -73,7 +73,8 @@ the same thing.
 A name can outlive the pipeline it names, though, so `pipeline_cursor` SHALL also record, as the nullable
 `pipeline_created_at`, the ADAS `created_at` of the pipeline the name meant when the runner last saw it. It is not a
 second key: nothing is keyed on it, and it is read only to detect a pipeline recreated under the same name (see the
-`pipeline-sync` capability). The sync SHALL own it; a cursor commit SHALL only stamp it on a row the commit inserts, and SHALL NOT overwrite it.
+`pipeline-sync` capability). The sync SHALL own it; a cursor commit SHALL only stamp it on a row the commit inserts,
+and SHALL NOT overwrite it.
 
 #### Scenario: Migrations provision the schema on boot
 
@@ -128,6 +129,12 @@ second key: nothing is keyed on it, and it is read only to detect a pipeline rec
 
 - **WHEN** a write attempts to store a `run_history` pause reason outside the permitted set
 - **THEN** the database rejects it
+
+#### Scenario: A stopped-pipeline reason is accepted and a retired one stays valid
+
+- **GIVEN** a database migrated to the current schema, holding a run paused with `pipeline_paused_operator`
+- **WHEN** a write stores `pipeline_stopped` as a run's pause reason
+- **THEN** the write is accepted, and the existing run's reason is still valid
 
 #### Scenario: A pause reason without its instant is rejected
 
@@ -274,3 +281,4 @@ future line in the enrichment path and the cost of breaking one is source conten
 - **GIVEN** the runtime level file sets `org.springframework` to DEBUG
 - **WHEN** the level is applied
 - **THEN** `org.springframework.web.client` and `org.springframework.http.converter` stay at INFO
+

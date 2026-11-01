@@ -4,19 +4,18 @@
 The operational surface: the metrics an operator reads to tell working from stuck, the readiness gate, the
 introspection endpoints for cached pipelines and group state, the per-group override, and the logging contract
 — including what must never be logged.
-
 ## Requirements
-
 ### Requirement: Runner metrics exposed via Prometheus
 
 The runner SHALL expose its own operational metrics on the Prometheus scrape endpoint, covering every lane it
 executes rather than only the row path:
 
-- gauges for pipelines cached, pipelines refused as unexecutable, **pipelines paused and pipelines paused by
-  the circuit breaker**, DLQ size, and **queue depth per task name** — a single summed depth cannot answer
-  which lane is backed up, which is the only question depth is asked for; and the paused total cannot carry
-  an alert on its own, because an operator pause is a legitimate steady state while a breaker pause, which
-  expires by itself, is never one;
+- gauges for pipelines cached, **pipelines stopped**, pipelines refused as unexecutable, **pipelines paused and
+  pipelines paused by the circuit breaker**, DLQ size, and **queue depth per task name** — a single summed depth
+  cannot answer which lane is backed up, which is the only question depth is asked for. The cached count includes
+  stopped pipelines, so cached minus stopped is the number the runner is running. With the operator pause gone
+  the two paused gauges count the same set, every pause being the breaker's; both SHALL remain, so dashboards and
+  alerts written against either keep working;
 - per-pipeline gauges for scan lag and **current-day spend**, so an approaching budget is visible before it pauses
   a pipeline;
 - group gauges for active-group count, dirty backlog, and groups declined on their cost ceiling — the signals
@@ -53,9 +52,15 @@ executes rather than only the row path:
 
 #### Scenario: A breaker pause is countable on its own
 
-- **GIVEN** one pipeline paused by an operator and one auto-paused by the breaker
+- **GIVEN** one pipeline auto-paused by the breaker
 - **WHEN** the Prometheus endpoint is scraped
-- **THEN** the paused total counts both and the auto-paused gauge counts only the second
+- **THEN** the paused total and the auto-paused gauge each count it once
+
+#### Scenario: A stopped pipeline is counted apart from the running ones
+
+- **GIVEN** three cached pipelines, one of them disabled in ADAS
+- **WHEN** the Prometheus endpoint is scraped
+- **THEN** the cached gauge reads 3 and the stopped gauge reads 1, and neither paused gauge counts the stopped one
 
 #### Scenario: A stuck backfill is visible in the metrics
 
@@ -77,10 +82,11 @@ readiness contributor SHALL report DOWN until the first successful sync.
 
 ### Requirement: Pipeline-cache introspection
 
-The runner SHALL expose a read-only endpoint listing the pipelines it currently has cached, with each
-pipeline's name, trigger kind, enabled flag, and generation. The entry carries **one** identifier: the name
-is the pipeline's identity in the ADAS registry, in this runner's state tables and in its work-item ids
-alike, so there is no second id to report.
+The runner SHALL expose a read-only endpoint listing the pipelines it currently has cached, with each pipeline's
+name, trigger kind, enabled flag, and generation. A stopped pipeline is cached, so it SHALL be listed with
+`enabled: false`; a pipeline the runner refused or ADAS no longer serves is not cached and is not listed. The
+entry carries **one** identifier: the name is the pipeline's identity in the ADAS registry, in this runner's
+state tables and in its work-item ids alike, so there is no second id to report.
 
 The entry SHALL report **one** declaration revision as well: the `generation` is what answers "which
 declaration is this pipeline running?", and no second version number is reported beside it.
@@ -105,6 +111,12 @@ superseded.
 - **GIVEN** a pipeline is present in the runner's cache
 - **WHEN** `GET /v1/pipelines/cache` is requested
 - **THEN** the response lists that pipeline with its name, trigger kind, and generation
+
+#### Scenario: A stopped pipeline is listed as stopped
+
+- **GIVEN** a pipeline disabled in ADAS and cached as stopped
+- **WHEN** `GET /v1/pipelines/cache` is requested
+- **THEN** the response lists it with `enabled: false`
 
 #### Scenario: A group pipeline's state is inspectable
 
@@ -286,9 +298,10 @@ generation; it is bounded by the overlap being transient and by the enrichment t
 by `scheduleIfNotExists`.
 
 What is **not** shared SHALL be documented rather than implied, because it is what bounds the overlap to a
-transient one: the DIAL rate limiter, the pipeline-pause registry (operator and breaker-driven) and the DLQ
+transient one: the DIAL rate limiter, the pipeline-pause registry (which holds breaker pauses only) and the DLQ
 breaker counters are per-process, so a second instance splits or doubles them. Sustained N>1 is therefore
-unsupported until pause is durable and the rate limiter is shared.
+unsupported until breaker state is shared and the rate limiter is shared. An operator's stop is not among them: it
+is ADAS's `enabled` flag, durable in the registry and read by every instance from the same feed.
 
 #### Scenario: Two instances overlap during a rolling update
 
@@ -299,20 +312,28 @@ unsupported until pause is durable and the rate limiter is shared.
 
 #### Scenario: A paused pipeline does not survive a replacement instance
 
-- **GIVEN** a pipeline paused by an operator or auto-paused by the DLQ circuit breaker
+- **GIVEN** a pipeline auto-paused by the DLQ circuit breaker
 - **WHEN** the instance holding that pause is replaced
 - **THEN** the replacement starts with the pipeline unpaused, since pause state is in-memory — documented as a
   consequence of the topology rather than treated as durable state
 
+#### Scenario: A stopped pipeline stays stopped across a replacement instance
+
+- **GIVEN** a pipeline disabled in ADAS and cached as stopped
+- **WHEN** the instance is replaced
+- **THEN** the replacement's first sync caches it as stopped, and none of its work runs
+
 ### Requirement: A paused pipeline says why, since when, and until when
 
-The paused-pipeline listing SHALL report, for each paused pipeline, its **origin** (operator or circuit
-breaker), the **reason** recorded when it was paused, the **instant** the pause began, and — for a pause
-that expires — the instant it resumes.
+The paused-pipeline listing SHALL report, for each paused pipeline, its **origin** (always `breaker`, the
+circuit breaker's pause being the only one the runner holds), the **reason** recorded when it was paused, the
+**instant** the pause began, and — for a pause that expires — the instant it resumes. A stopped pipeline is not
+paused and SHALL NOT be listed: its stop is ADAS's `enabled: false`, which the cache listing and the runtime view
+report.
 
 A listing of bare names cannot answer the question it is opened to answer. A list of one name tells an
-operator only what they already suspected and nothing about whether the pause was a decision somebody had
-taken or a breaker that had failed to let go. Those two call for opposite responses.
+operator only what they already suspected and nothing about why the breaker tripped or when it lets go. The
+origin stays on the wire although it has one value, so a client written against the listing keeps reading it.
 
 The runner SHALL additionally report the condition **recurrently** — a periodic warning naming every
 paused pipeline with its origin and how long it has been paused — not only at the moment it arises. A
@@ -327,16 +348,16 @@ age, at `STATUS_REPORT_INTERVAL`. A separate paused-pipeline reporter and its ow
 (`DLQ_PAUSE_REPORT_INTERVAL`) SHALL NOT exist alongside it, so one condition is not announced by two lines
 on two clocks.
 
-The health endpoint SHALL NOT report a paused pipeline as unhealthy. A pause is an operational fact and is
-sometimes deliberate, while the runner's readiness group and this deployment's liveness wiring would turn
+The health endpoint SHALL NOT report a paused or stopped pipeline as unhealthy. A pause is an operational fact
+and a stop is deliberate, while the runner's readiness group and this deployment's liveness wiring would turn
 a DOWN-capable contributor into a pod taken out of service or restarted.
 
 #### Scenario: The listing distinguishes a decision from a stuck breaker
 
-- **GIVEN** one pipeline paused by an operator and one auto-paused by the breaker
+- **GIVEN** one pipeline auto-paused by the breaker and one disabled in ADAS
 - **WHEN** the paused pipelines are listed
-- **THEN** each reports its origin, its reason and when it was paused, and only the auto-paused one reports
-  a resume time
+- **THEN** only the auto-paused one is listed, with origin `breaker`, its reason, when it was paused and when it
+  resumes
 
 #### Scenario: The condition keeps announcing itself
 
@@ -358,7 +379,7 @@ a DOWN-capable contributor into a pod taken out of service or restarted.
 
 ### Requirement: Operator actions are logged with the acting principal
 
-The runner SHALL log at INFO every operator action that changes what it does: pipeline pause and resume,
+The runner SHALL log at INFO every operator action that changes what it does: lifting a breaker pause early,
 backfill start, pause, resume and cancel, and DLQ requeue. Each line SHALL name the action, the pipeline, the
 affected run or item where there is one, and the acting principal. When no principal exists (`SECURITY_MODE=none`)
 the line SHALL carry `principal=-` rather than omitting the field. The line SHALL NOT carry a request body.
@@ -366,10 +387,10 @@ the line SHALL carry `principal=-` rather than omitting the field. The line SHAL
 An operator decision and a machine decision call for opposite responses (see the paused-pipeline requirement), and
 a log-only reader can distinguish them only if the decision announces who took it.
 
-#### Scenario: A pause names who paused
+#### Scenario: An early resume names who resumed
 
-- **GIVEN** an authenticated operator
-- **WHEN** they pause a pipeline through the admin endpoint
+- **GIVEN** an authenticated operator and a pipeline the breaker has paused
+- **WHEN** they lift the pause through the admin endpoint
 - **THEN** one INFO line names the action, the pipeline and the operator's principal
 
 #### Scenario: An unauthenticated deployment still logs the action
@@ -410,8 +431,9 @@ right now, in a single shape for the row, group and Class-1 lanes.
 
 The response SHALL always carry the following, for every lane:
 - `pipeline_name`, `generation`, and `lane` (`row`, `group` or `class1`, spelled as the status heartbeat spells it);
-- `status`: `state`, one of `active`, `paused`, `held`, `over_budget` or `backpressured`. For a pause, it also
-  carries the pause's `origin` (`operator` or `breaker`), `reason`, `since` and, for an expiring pause, `resumes_at`;
+- `status`: `state`, one of `stopped`, `active`, `paused`, `held`, `over_budget` or `backpressured`. `stopped` means
+  the pipeline is disabled in ADAS. For a pause, it also carries the pause's `origin` (always `breaker`), `reason`,
+  `since` and, for an expiring pause, `resumes_at`;
 - `schedule`: `last_scan_at`, `next_run_at`, `running_now`, `consecutive_failures`, `last_error` and
   `last_error_at`;
 - `progress`: `lag_seconds`, `has_more`, `caught_up_at` and `last_write_at`.
@@ -439,7 +461,9 @@ error, or running now.
 
 The status SHALL be derived by the same logic as the status heartbeat, so the two never disagree about one pipeline
 at one instant:
-- Precedence is paused, then held, then over_budget, then backpressured, then active.
+- Precedence is stopped, then paused, then held, then over_budget, then backpressured, then active. Stopped comes
+  first because it is the one state a user chose: a stopped pipeline that the breaker also paused runs nothing
+  whatever the breaker decides, and the pause is still listed by the paused-pipeline listing.
 - A Class-1 pipeline is never over_budget or backpressured.
 
 The view SHALL NOT report the heartbeat's stall flag. Stalled is a heuristic, and the view reports state, not a
@@ -461,7 +485,9 @@ depend on it, and SHALL NOT fail the read. Such a declaration already fails the 
 and the view is what an operator opens to find out why.
 
 A cache that has never synced SHALL be answered with the existing 503 `pipeline_cache_cold`, before any lookup. A
-pipeline that is not in a synced cache SHALL be answered with 404 `not_found`.
+pipeline that is not in a synced cache SHALL be answered with 404 `not_found`. A stopped pipeline is cached, so
+it SHALL be answered with 200 and its full view, its persisted progress and queue included: a stop keeps that
+state, and the view is where an operator checks what a restart will continue from.
 
 #### Scenario: A row pipeline reports its queue next to its lag
 
@@ -507,6 +533,12 @@ pipeline that is not in a synced cache SHALL be answered with 404 `not_found`.
 - **GIVEN** a pipeline auto-paused by the circuit breaker, with breaker pauses set to expire
 - **WHEN** its runtime view is read
 - **THEN** `status.state` is `paused`, `status.origin` is `breaker` and `status.resumes_at` is set
+
+#### Scenario: A stopped pipeline reports its state rather than not-found
+
+- **GIVEN** a row pipeline disabled in ADAS and cached as stopped, with chunks held in its queue
+- **WHEN** its runtime view is read
+- **THEN** the response is 200, `status.state` is `stopped`, and `queue` counts the held chunks
 
 #### Scenario: Failure totals match the DLQ listing
 
@@ -626,3 +658,4 @@ two endpoints that report it.
 - **WHEN** `GET /v1/pipelines/paused` is requested
 - **THEN** its entry carries `pipeline_name`, `origin` `breaker`, `reason`, `since` and `resumes_at`
 - **AND** it carries no `pipelineName` or `resumesAt` property
+

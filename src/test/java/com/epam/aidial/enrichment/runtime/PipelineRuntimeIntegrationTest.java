@@ -369,6 +369,17 @@ class PipelineRuntimeIntegrationTest {
                 .andExpect(jsonPath("$.backfill").doesNotExist());
     }
 
+    /** A stopped pipeline is still the runner's to describe: 200 and {@code stopped}, not a 404. */
+    @Test
+    void stoppedPipelineReadsStopped() throws Exception {
+        pipelineCache.replaceAll(Map.of(ROW, TestPipelines.stopped(pipelineCache.get(ROW))));
+
+        mockMvc.perform(get("/v1/pipelines/{name}/runtime", ROW))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status.state").value("stopped"))
+                .andExpect(jsonPath("$.status.origin").doesNotExist());
+    }
+
     @Test
     void uncachedPipelineIsNotFound() throws Exception {
         mockMvc.perform(get("/v1/pipelines/{name}/runtime", "absent"))

@@ -1,6 +1,7 @@
 package com.epam.aidial.enrichment.class1;
 
 import com.epam.aidial.enrichment.adas.AdasMaterializeClient;
+import com.epam.aidial.enrichment.adas.AdasRefusals;
 import com.epam.aidial.enrichment.adas.dto.MaterializeResponse;
 import com.epam.aidial.enrichment.adas.dto.PipelineDto;
 import com.epam.aidial.enrichment.configuration.AdasProperties;
@@ -26,6 +27,7 @@ import com.epam.aidial.enrichment.worker.WorkerMdc;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.util.Map;
 
@@ -73,6 +75,10 @@ public class Class1MaterializeExecutor {
             log.debug("Pipeline {} absent from cache; skipping materialize", pipelineName);
             return;
         }
+        if (!pipeline.enabled()) {
+            log.info("Pipeline {} is stopped; skipping materialize", pipelineName);
+            return;
+        }
         if (pauseRegistry.isPaused(pipelineName)) {
             log.info("Pipeline {} is paused; skipping materialize", pipelineName);
             return;
@@ -91,6 +97,13 @@ public class Class1MaterializeExecutor {
             log.info("Pipeline {} was recreated during this fire; window {} not recorded, ending the fire", pipelineName,
                     position.windows + 1);
         } catch (RuntimeException e) {
+            if (e instanceof RestClientResponseException rejection && AdasRefusals.isPipelineDisabled(rejection)) {
+                // Not a failure: the pipeline was stopped in ADAS before this runner's next sync saw it. Nothing was
+                // written for this window, the cursor holds, and the sync cancels the recurring instance.
+                log.info("Pipeline {} is stopped in ADAS; ending the fire at window {} without recording it", pipelineName,
+                        position.windows + 1);
+                return;
+            }
             runOutcome.recordFailure(pipelineName, ErrorMessages.classify(e));
             runnerMetrics.incrementClass1TickFailures();
             // No stack here: the failure propagates, and the scheduler listener's failure line carries the one
@@ -158,7 +171,11 @@ public class Class1MaterializeExecutor {
                 log.warn("Pipeline {} reported more backlog but cursor did not advance; halting drain", pipelineName);
                 break;
             }
-            // Re-evaluate the pause gate each window so a mid-drain pause stops within one window.
+            // Re-evaluate the stop and pause gates each window so a mid-drain stop or pause halts within one window.
+            if (pipelineCache.isStopped(pipelineName)) {
+                log.info("Pipeline {} stopped mid-materialize; halting drain after {} window(s)", pipelineName, windows);
+                break;
+            }
             if (pauseRegistry.isPaused(pipelineName)) {
                 log.info("Pipeline {} paused mid-materialize; halting drain after {} window(s)", pipelineName, windows);
                 break;

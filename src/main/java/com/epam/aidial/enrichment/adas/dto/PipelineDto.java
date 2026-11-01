@@ -9,7 +9,7 @@ import java.util.Map;
 
 /**
  * An {@code enrich}-kind pipeline as returned by the ADAS registry sync feed
- * ({@code GET /v1/pipelines?kind=enrich&enabled=true&view=compiled}), consumed read-only by the runner.
+ * ({@code GET /v1/pipelines?kind=enrich&view=compiled}), consumed read-only by the runner.
  * {@code grainKey}, {@code versionColumn}, {@code responseSchema} and {@code outputs} are derived by ADAS
  * from the target enrichment and the resolved input; {@code transform} is the declaration as authored.
  * {@code generation} is the change-detection token the runner diffs on (there is no ETag/304 on the feed).
@@ -77,7 +77,9 @@ import java.util.Map;
  * @param advanced the execution knobs as declared, absent when the declaration set none. Read them through
  *                 the accessors below rather than directly, so an absent object is not a null check at every
  *                 call site
- * @param generation the declaration revision, bumped by ADAS on <em>every</em> accepted mutation. It is both
+ * @param enabled    the pipeline's single run control: false caches it as stopped, its work held until re-enabled
+ * @param generation the declaration revision, bumped by ADAS on every declaration change — not on a patch that only
+ *                   changes {@code enabled}, so a stop and restart leaves held work current. It is both
  *                   the change-detection token and — since the fold — the version component of the runner's
  *                   own deterministic work-item ids, dead-letter row identity, spend counter key and
  *                   {@code pipeline_generation} provenance stamp

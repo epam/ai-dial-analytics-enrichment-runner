@@ -16,6 +16,7 @@ import com.epam.aidial.enrichment.exception.AdasIncompatibleHoldException;
 import com.epam.aidial.enrichment.exception.AdasTransportException;
 import com.epam.aidial.enrichment.exception.InputMappingException;
 import com.epam.aidial.enrichment.exception.OutputMappingException;
+import com.epam.aidial.enrichment.exception.PipelineStoppedHoldException;
 import com.epam.aidial.enrichment.exception.TransientChunkException;
 import com.epam.aidial.enrichment.exception.UnresolvedPlaceholderException;
 import com.epam.aidial.enrichment.observability.RunnerMetrics;
@@ -288,6 +289,15 @@ class GroupWorkerServiceTest {
                 anyBoolean());
         verify(groupStateWriter, never()).stampComputedAndCharge(anyString(), anyString(), anyLong(), any(),
                 anyBoolean(), any());
+    }
+
+    @Test
+    void stoppedPipelinesGroupItemIsHeldWithoutFetchingOrCallingTheModel() {
+        when(pipelineCache.get(PIPELINE_NAME)).thenReturn(TestPipelines.stopped(groupPipeline(GENERATION)));
+
+        assertThatThrownBy(() -> worker.process("item-1", payload())).isInstanceOf(PipelineStoppedHoldException.class);
+
+        verify(groupFetchClient, never()).fetch(anyString(), anyString(), anyInt());
     }
 
     @Test

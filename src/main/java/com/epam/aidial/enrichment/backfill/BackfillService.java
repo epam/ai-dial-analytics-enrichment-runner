@@ -6,7 +6,6 @@ import com.epam.aidial.enrichment.exception.BackfillRunNotFoundException;
 import com.epam.aidial.enrichment.exception.PipelineCacheNotReadyException;
 import com.epam.aidial.enrichment.exception.PipelineNotFoundException;
 import com.epam.aidial.enrichment.observability.OperatorActionLog;
-import com.epam.aidial.enrichment.pause.PauseOrigin;
 import com.epam.aidial.enrichment.pause.PipelinePauseRegistry;
 import com.epam.aidial.enrichment.persistence.RunHistoryEntity;
 import com.epam.aidial.enrichment.persistence.RunHistoryRepository;
@@ -184,9 +183,13 @@ public class BackfillService {
         if (pipeline == null) {
             throw new PipelineNotFoundException(pipelineName);
         }
+        if (!pipeline.enabled()) {
+            throw new BackfillConflictException("Pipeline " + pipelineName
+                    + " is stopped; re-enable it in ADAS first");
+        }
         pauseRegistry.current(pipelineName).ifPresent(pause -> {
             throw new BackfillConflictException("Pipeline " + pipelineName + " is " + describe(pause)
-                    + "; resume the pipeline first");
+                    + "; wait for the pause to lift, or lift it early first");
         });
         if (spendPauseGate.isOverBudget(pipeline)) {
             throw new BackfillConflictException("Pipeline " + pipelineName
@@ -202,7 +205,7 @@ public class BackfillService {
     }
 
     private static String describe(PipelinePauseRegistry.Pause pause) {
-        String by = pause.origin() == PauseOrigin.BREAKER ? "paused by the DLQ circuit breaker" : "paused by an operator";
+        String by = "paused by the DLQ circuit breaker";
         return pause.resumesAt() == null ? by : by + " until " + pause.resumesAt();
     }
 

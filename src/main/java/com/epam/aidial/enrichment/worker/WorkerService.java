@@ -7,6 +7,7 @@ import com.epam.aidial.enrichment.configuration.WorkerProperties;
 import com.epam.aidial.enrichment.dlq.DlqCircuitBreaker;
 import com.epam.aidial.enrichment.dlq.DlqStage;
 import com.epam.aidial.enrichment.exception.OutputMappingException;
+import com.epam.aidial.enrichment.exception.PipelineStoppedHoldException;
 import com.epam.aidial.enrichment.exception.ResponseValidationException;
 import com.epam.aidial.enrichment.exception.TransientChunkException;
 import com.epam.aidial.enrichment.exception.UnresolvedPlaceholderException;
@@ -109,14 +110,20 @@ public class WorkerService {
                     payload.getPipelineName(), payload.getPipelineGeneration());
             return;
         }
+        // Held, never dropped: the cursor already passed these rows, so a dropped chunk is lost for good. Asked after
+        // the stale check, because a re-declaration while stopped still makes the chunk's inputs obsolete.
+        if (!pipeline.enabled()) {
+            throw new PipelineStoppedHoldException("chunk " + chunkId);
+        }
 
         TransformDto transform = pipeline.transform();
         // A transient failure on any row aborts the whole chunk (propagates out of mapRows); permanent
         // per-row errors come back as DLQ outcomes so siblings still proceed.
         List<RowOutcome> outcomes = mapRows(pipeline, transform, payload);
 
-        // Re-check before any persistence: a disable/re-pin mid-flight drops the chunk without writing
-        // DLQ rows or tripping the breaker on its way out.
+        // Re-check before any persistence: a deletion or re-pin mid-flight drops the chunk without writing DLQ rows
+        // or tripping the breaker on its way out. A stop does not: the model calls are paid for, so the write item is
+        // enqueued and the write lane holds it until the pipeline is re-enabled.
         PipelineDto current = pipelineCache.get(payload.getPipelineName());
         if (current == null || isStale(current, payload)) {
             log.info("Dropping chunk for pipeline {}: pipeline changed mid-flight", payload.getPipelineName());

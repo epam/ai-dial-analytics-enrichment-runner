@@ -126,6 +126,32 @@ class PipelineScanExecutorTest {
     }
 
     @Test
+    void stoppedPipelineIsNotScanned() {
+        when(pipelineCache.get(PIPELINE_NAME)).thenReturn(TestPipelines.stopped(TestPipelines.builder(PIPELINE_NAME).build()));
+
+        executor.execute(PIPELINE_NAME);
+
+        verify(scanClient, never()).scan(anyString(), any(), anyInt());
+    }
+
+    @Test
+    void haltsDrainWhenThePipelineIsStoppedMidFire() {
+        PipelineDto pipeline = TestPipelines.builder(PIPELINE_NAME).build();
+        when(pipelineCache.get(PIPELINE_NAME)).thenReturn(pipeline);
+        when(cursorRepository.findById(PIPELINE_NAME)).thenReturn(Optional.empty());
+        // The sync publishes the stop after the first page: the snapshot this fire started from cannot see it.
+        when(pipelineCache.isStopped(PIPELINE_NAME)).thenReturn(true);
+        when(scanClient.scan(anyString(), any(), anyInt()))
+                .thenReturn(new ScanResponse(List.of(), "c1", true, 0L));
+        when(chunkBuilder.build(any(), anyInt(), any()))
+                .thenReturn(new ChunkBatch(List.of(), List.of(), TestPages.allWork(0)));
+
+        executor.execute(PIPELINE_NAME);
+
+        verify(scanClient, times(1)).scan(eq(PIPELINE_NAME), any(), anyInt());
+    }
+
+    @Test
     void pageWithoutNextCursorIsCommittedAsNoProgress() {
         PipelineDto pipeline = TestPipelines.builder(PIPELINE_NAME).build();
         when(pipelineCache.get(PIPELINE_NAME)).thenReturn(pipeline);

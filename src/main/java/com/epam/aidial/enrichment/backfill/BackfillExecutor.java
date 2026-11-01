@@ -13,7 +13,6 @@ import com.epam.aidial.enrichment.dlq.DlqCircuitBreaker;
 import com.epam.aidial.enrichment.observability.Elapsed;
 import com.epam.aidial.enrichment.observability.RunnerMetrics;
 import com.epam.aidial.enrichment.observability.trace.LogExecution;
-import com.epam.aidial.enrichment.pause.PauseOrigin;
 import com.epam.aidial.enrichment.pause.PipelinePauseRegistry;
 import com.epam.aidial.enrichment.persistence.RunHistoryEntity;
 import com.epam.aidial.enrichment.persistence.RunHistoryRepository;
@@ -30,7 +29,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
-import java.util.Optional;
 
 /**
  * Drains one batch of a backfill run when its {@code backfill-run} task fires, optionally bounded to a version
@@ -175,8 +173,8 @@ public class BackfillExecutor {
                                  boolean midRun) {
         String when = midRun ? " mid-run" : "";
         if (pipeline == null) {
-            log.warn("Backfill {} paused: pipeline {} is absent from the pipeline cache{} — disabled or deleted in "
-                    + "ADAS, or refused by the runner as unexecutable; resume the run once it is back",
+            log.warn("Backfill {} paused: pipeline {} is absent from the pipeline cache{} — deleted in ADAS, or "
+                    + "refused by the runner as unexecutable; resume the run once it is back",
                     runId, pipelineName, when);
             pause(runId, generation, BackfillPauseReason.PIPELINE_ABSENT);
             return true;
@@ -188,15 +186,18 @@ public class BackfillExecutor {
             pause(runId, generation, BackfillPauseReason.PIPELINE_CHANGED);
             return true;
         }
-        // Backfill honors the same enqueue guards as the live path: a paused pipeline (operator or breaker)
-        // or an exhausted spend budget pauses the run rather than draining history into the DLQ / budget.
-        Optional<PipelinePauseRegistry.Pause> pipelinePause = pauseRegistry.current(pipelineName);
-        if (pipelinePause.isPresent()) {
-            boolean breaker = pipelinePause.get().origin() == PauseOrigin.BREAKER;
-            log.warn("Backfill {} paused: pipeline {} was paused by {}{}; resume the pipeline, then the run",
-                    runId, pipelineName, breaker ? "the DLQ circuit breaker" : "an operator", when);
-            pause(runId, generation, breaker
-                    ? BackfillPauseReason.PIPELINE_PAUSED_BREAKER : BackfillPauseReason.PIPELINE_PAUSED_OPERATOR);
+        // Backfill honors the same guards as the live path: a stopped pipeline, a breaker-paused one or an
+        // exhausted spend budget pauses the run rather than draining history into held work, the DLQ or the budget.
+        if (!pipeline.enabled()) {
+            log.warn("Backfill {} paused: pipeline {} is stopped{}; re-enable it in ADAS, then resume the run",
+                    runId, pipelineName, when);
+            pause(runId, generation, BackfillPauseReason.PIPELINE_STOPPED);
+            return true;
+        }
+        if (pauseRegistry.current(pipelineName).isPresent()) {
+            log.warn("Backfill {} paused: pipeline {} was paused by the DLQ circuit breaker{}; resume the run once "
+                    + "the pause lifts", runId, pipelineName, when);
+            pause(runId, generation, BackfillPauseReason.PIPELINE_PAUSED_BREAKER);
             return true;
         }
         if (spendPauseGate.isOverBudget(pipeline)) {

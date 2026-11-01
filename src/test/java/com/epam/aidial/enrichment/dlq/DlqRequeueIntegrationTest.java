@@ -169,7 +169,7 @@ class DlqRequeueIntegrationTest {
                 .pipelineName("r-guarded")
                 .pipelineGeneration(PreFoldWorkItem.PRE_FOLD_GENERATION)
                 .stage(DlqStage.UPSERT.dbValue())
-                .error("pipeline absent from the runner's cache (disabled or deleted) when the write ran")
+                .error("pipeline absent from the runner's cache (deleted or refused) when the write ran")
                 .taskName(UpsertRowsTask.TASK_NAME)
                 .payload(jsonMapper.writeValueAsString(new UpsertPayload("r-guarded",
                         PreFoldWorkItem.PRE_FOLD_GENERATION, List.of(Map.of("event_id", "e0")))))

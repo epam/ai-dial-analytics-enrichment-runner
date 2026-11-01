@@ -8,19 +8,29 @@ and reconciling one recurring task per pipeline onto the lane its `transform.typ
 ### Requirement: Pipeline registry sync
 
 The runner SHALL periodically poll the ADAS pipeline registry and maintain an in-memory cache of the
-enabled `enrich`-kind pipelines keyed by pipeline **name**. Because the feed carries no ETag/304,
-change-detection SHALL be done client-side using each pipeline's `generation`. A failed poll SHALL leave
+`enrich`-kind pipelines keyed by pipeline **name**, each held as **active** (`enabled: true`) or **stopped**
+(`enabled: false`). Because the feed carries no ETag/304, change-detection SHALL be done client-side, using each
+pipeline's `generation` for its declaration and its `enabled` flag for whether it runs. The two SHALL be compared
+independently: ADAS does not move `generation` on a patch that only changes `enabled`, so a stop or a restart
+arrives as a changed flag at an unchanged generation and SHALL still be applied. A failed poll SHALL leave
 the current cache and recurring tasks unchanged (no partial teardown). The cache SHALL be published as a
 single atomic snapshot so a concurrent reader never observes a half-applied reconcile.
 
-The poll SHALL request `GET /v1/pipelines?kind=enrich&enabled=true&view=compiled` and SHALL send **all
-three** filters explicitly. `kind=enrich` is load-bearing rather than an optimisation: the registry also
-holds `aggregate` pipelines, which ADAS executes itself and which carry none of the fields the runner
-reads, so an unfiltered feed would offer the runner work it must not schedule and could not model.
-`enabled=true` is sent for the same reason it always was: unfiltered, that endpoint is ADAS's operator
-listing of the whole registry and carries disabled pipelines too. The runner SHALL nonetheless still skip
-a pipeline whose `enabled` is false when admitting the fetched list, so reconciliation is correct for any
-caller and does not depend on which filter the fetch happened to send.
+The poll SHALL request `GET /v1/pipelines?kind=enrich&view=compiled` and SHALL send **both** parameters
+explicitly, and SHALL NOT send an `enabled` filter. `kind=enrich` is load-bearing rather than an optimisation:
+the registry also holds `aggregate` pipelines, which ADAS executes itself and which carry none of the fields the
+runner reads, so an unfiltered feed would offer the runner work it must not schedule and could not model.
+`enabled` is deliberately **not** sent. ADAS's `enabled` flag is the pipeline's single run control, and under
+`enabled=true` a stopped pipeline and a deleted one are both simply absent from the feed, so the runner could
+not keep a stopped pipeline's queued work while discarding a deleted one's. The unfiltered listing carries every
+registered pipeline the projection can serve, each marked with its `enabled` value. The runner SHALL execute
+only entries carrying `enabled: true`, and SHALL cache an entry carrying `enabled: false` as **stopped**: it is
+admitted through the same gate, holds its persisted state, and has nothing scheduled or executed for it (see
+"Recurring task reconciliation" and the `enrichment-worker` capability). A pipeline absent from a populated
+cache is one ADAS no longer serves — deleted, or withheld as unservable — or one the runner refused, and keeps
+the treatment absence has always had. The unfiltered listing carries pipelines that were never armed in ADAS, so
+executing only `enabled: true` entries is what keeps an unvalidated declaration from running; ADAS's refusal of
+a disabled pipeline's writes is the backstop, not the guard.
 
 `view=compiled` SHALL be sent on the sync feed and on any other pipeline read the runner makes, and is
 **mandatory rather than advisory**. ADAS serves two projections of one stored pipeline, differing in
@@ -54,19 +64,19 @@ variable map an object keyed by variable name — so a member read at the wrong 
 than binding to the wrong thing. The runner reads the scan table from the former and the template's
 variables from the latter, and neither has a derived counterpart at the other's position.
 
-Every fact the runner reads SHALL be read under exactly one spelling — the declaration revision is the
-pipeline's `generation`, the transform members are `transform`'s own, and the schema the model is held to
-is the derived top-level `response_schema`. The runner SHALL NOT read a second spelling of any of these — `vars`, `input_bindings`, `output_bindings`, `cadence`, `scan_every`,
-`batch_scan_limit`, `batch_chunk`, `sampling`, a top-level `rate_rpm`, `input_vars` or `output_vars` —
-none of which the feed carries any more.
+Every fact the runner reads SHALL be read under exactly one spelling — the declaration revision is the pipeline's
+`generation`, the transform members are `transform`'s own, and the schema the model is held to is the derived
+top-level `response_schema`. The runner SHALL NOT read a second spelling of any of these — `vars`, `input_bindings`,
+`output_bindings`, `cadence`, `scan_every`, `batch_scan_limit`, `batch_chunk`, `sampling`, a top-level `rate_rpm`,
+`input_vars` or `output_vars` — none of which the feed carries any more.
 
-The runner SHALL NOT retain a compatibility path for a pipeline shape served under an earlier contract
-version. A build reading such an ADAS is a state the recommended roll-out does not produce, and one the contract-version check refuses and
-holds when that sequence is not followed; and tolerance would
-defeat the contract-version check, because a build able to read the old shape cannot distinguish a correct
-feed from a stale producer. The skew is caught by the `Adas-Contract-Version` echo that this capability
-already requires on every call — see "Every ADAS call declares a contract version and every response is
-checked for its echo" — and **no query parameter is added to the feed** for it.
+The runner SHALL NOT retain a compatibility path for a pipeline shape served under an earlier contract version. A
+build reading such an ADAS is a state the recommended roll-out does not produce, and one the contract-version check
+refuses and holds when that sequence is not followed; and tolerance would defeat the contract-version check, because
+a build able to read the old shape cannot distinguish a correct feed from a stale producer. The skew is caught by
+the `Adas-Contract-Version` echo that this capability already requires on every call — see "Every ADAS call declares
+a contract version and every response is checked for its echo" — and **no query parameter is added to the feed** for
+it.
 
 An absent `advanced`, or an absent member within it, SHALL mean "apply the runner's own configured
 default", exactly as an absent `cadence` did. ADAS writes no default into the projection, because a
@@ -75,11 +85,11 @@ default echoed back would be indistinguishable from an operator having chosen it
 The feed's response body SHALL be read as the object envelope `{"pipelines": [...]}`, not as a bare JSON
 array. A blank body SHALL be read as an empty list, as it is today.
 
-Because the poll fetches the **full** enabled-pipeline list and never an incremental delta, a *successful*
-empty response SHALL be reconciled as a genuine "zero enabled pipelines" — including the case of disabling
-or deleting the last remaining pipeline, which under this filter leaves the feed rather than arriving as
-`enabled: false`. Treating that as suspect would leave an orphan recurring task firing against a pipeline
-the operator has disabled. A *failed* poll is the different signal, and is the one that changes nothing.
+Because the poll fetches the **full** pipeline list and never an incremental delta, a *successful*
+empty response SHALL be reconciled as a genuine "zero pipelines" — including the case of deleting the last
+remaining pipeline, which leaves the feed. Disabling it does not: a disabled pipeline stays in the feed, marked
+`enabled: false`. Treating an empty feed as suspect would leave an orphan recurring task firing against a pipeline
+the operator has deleted. A *failed* poll is the different signal, and is the one that changes nothing.
 
 #### Scenario: Enabled pipelines are cached
 
@@ -87,14 +97,19 @@ the operator has disabled. A *failed* poll is the different signal, and is the o
 - **THEN** the pipeline cache contains both, keyed by name, with their authored transforms and resolved
   response schemas
 
-#### Scenario: The poll requests the compiled projection of the enabled enrich pipelines
+#### Scenario: A disabled pipeline is cached as stopped
+
+- **WHEN** ADAS returns a pipeline carrying `enabled: false` that the admission gate accepts
+- **THEN** the pipeline is cached as stopped, with its declaration, and is neither scheduled nor executed
+
+#### Scenario: The poll requests the compiled projection of every enrich pipeline
 
 - **WHEN** the runner polls the ADAS pipeline registry
-- **THEN** the request carries `kind=enrich`, `enabled=true` and `view=compiled` — and no `contract`
-  query parameter, the version travelling as the `Adas-Contract-Version` header on every call — so
-  neither an `aggregate` pipeline nor a disabled one is ever what the runner reconciles against, and the
-  pipelines it does receive carry their transform, resolved response schema, outputs, grain key and
-  version column
+- **THEN** the request carries `kind=enrich` and `view=compiled`, no `enabled` filter, and no `contract`
+  query parameter, the version travelling as the `Adas-Contract-Version` header on every call — so an
+  `aggregate` pipeline is never what the runner reconciles against, a disabled one arrives marked
+  `enabled: false`, and the pipelines it receives carry their transform, resolved response schema, outputs,
+  grain key and version column
 
 #### Scenario: The feed is read as an envelope
 
@@ -107,10 +122,31 @@ the operator has disabled. A *failed* poll is the different signal, and is the o
 - **THEN** the poll fails rather than silently reconciling to zero pipelines, and the previously cached
   pipelines and their recurring tasks remain unchanged
 
+#### Scenario: An unparseable disabled entry does not fail the poll
+
+- **GIVEN** the feed carries an active pipeline, and a pipeline with `enabled: false` whose entry does not parse
+  (for example, a trigger kind this build does not model)
+- **WHEN** the poll runs
+- **THEN** the disabled entry is skipped with a WARN, logged once per name and generation, and reads as absent,
+  while the active pipeline is cached and scheduled
+
+#### Scenario: An unparseable enabled entry fails the poll
+
+- **WHEN** a pipeline with `enabled: true` in the feed does not parse
+- **THEN** the poll fails, and the previously cached pipelines and their recurring tasks remain unchanged
+
 #### Scenario: A disabled pipeline reaching the runner is not scheduled
 
 - **WHEN** a pipeline with `enabled: false` is present in a fetched list
-- **THEN** it is neither cached nor given a recurring task instance, whatever filter the fetch sent
+- **THEN** it is cached as stopped and is given no recurring task instance
+
+#### Scenario: A flag-only change is applied without a generation change
+
+- **GIVEN** a cached active pipeline at generation 4
+- **WHEN** a poll returns it at generation 4 with `enabled: false`, and a later poll at generation 4 with
+  `enabled: true`
+- **THEN** the first poll marks it stopped and cancels its recurring instance, and the second marks it active
+  and schedules its instance again, with its cursor and group state unchanged
 
 #### Scenario: A failed poll is non-destructive
 
@@ -160,35 +196,39 @@ the operator has disabled. A *failed* poll is the different signal, and is the o
 
 ### Requirement: Recurring task reconciliation
 
-For each enabled pipeline the runner SHALL maintain exactly one db-scheduler recurring task instance
-(instance id = pipeline name) under the task name selected by the pipeline's **`transform.type`**:
-`class1-materialize` for a `sql` transform and `pipeline-scan` otherwise. The instance's schedule SHALL be
-derived from the pipeline's trigger: the trigger's cron expression (Spring 6-field, UTC) for `schedule`,
-on either lane, and a fixed delay of the configured `group.scan-cadence` for `group`. There SHALL be no
-fixed-delay row-grain schedule and no per-pipeline cadence: `on_ingest` and `advanced.scan_every` are
-retired, and ADAS stores an explicit cron on every row-grain pipeline, defaulting it to every minute at a
-name-derived second. A `schedule` pipeline arriving without a cron is refused by the admission gate rather
-than given a default the declaration does not state. The runner SHALL reschedule an existing instance when the
-schedule stored on the instance differs from the one derived from the current declaration, **or** when the
-pipeline's cached `generation` changed. The stored-schedule comparison is what applies a schedule ADAS rewrote
-without a `generation` bump, and it converges on its own: an instance picked by an execution (one killed by a
-scale-down stays picked until it is declared dead) is neither listed nor reschedulable at one poll, and is simply
-compared again at the next. The generation trigger does not converge that way: the poll caches the new
-`generation` whether or not the reschedule happened, so a bump whose instance is picked, or loses db-scheduler's
-optimistic-version race, MAY go without a reschedule when its derived schedule is unchanged. The cost is timing
-only — the instance keeps its current next execution time and failure counters — since the schedule it stores
-is already the one the new declaration derives, and the new declaration is cached and read at the next fire. A restart alone SHALL NOT reschedule an instance whose stored schedule already
-matches, because rescheduling a cron instance moves an overdue fire to its next slot and clears its failure
-counters. A pipeline whose reconcile failed SHALL still be cached at its current declaration: an uncached
-pipeline has its queued work dropped irreversibly by the workers, and the create path and the stored-schedule
-comparison retry it on the next poll. When a pipeline is no longer present in the enabled feed
-(disabled or deleted), or is no longer routed to a given task name, the runner SHALL cancel that instance
-and — when the pipeline left the feed entirely — release its per-pipeline resources: the DIAL rate
-limiter's bucket, its per-pipeline metric gauges, and the dead-letter breaker's failure count. Each is an
-in-memory map keyed by pipeline name, so leaving an entry behind both grows without bound and hands a
-re-enabled pipeline the failure count it left behind. Reconciliation SHALL therefore consider every task
-name the runner schedules pipelines onto, so a pipeline whose `transform.type` changed does not leave a
-stale instance under its former lane; that re-route is reachable by an ordinary declaration patch. A single pipeline's reconcile failure SHALL be isolated (logged and
+For each active (`enabled: true`) pipeline the runner SHALL maintain exactly one db-scheduler recurring task
+instance (instance id = pipeline name) under the task name selected by the pipeline's **`transform.type`**:
+`class1-materialize` for a `sql` transform and `pipeline-scan` otherwise. The instance's schedule SHALL be derived
+from the pipeline's trigger: the trigger's cron expression (Spring 6-field, UTC) for `schedule`, on either lane, and
+a fixed delay of the configured `group.scan-cadence` for `group`. There SHALL be no fixed-delay row-grain schedule
+and no per-pipeline cadence: `on_ingest` and `advanced.scan_every` are retired, and ADAS stores an explicit cron on
+every row-grain pipeline, defaulting it to every minute at a name-derived second. A `schedule` pipeline arriving
+without a cron is refused by the admission gate rather than given a default the declaration does not state. The
+runner SHALL reschedule an existing instance when the schedule stored on the instance differs from the one derived
+from the current declaration, **or** when the pipeline's cached `generation` changed. The stored-schedule comparison
+is what applies a schedule ADAS rewrote without a `generation` bump, and it converges on its own: an instance picked
+by an execution (one killed by a scale-down stays picked until it is declared dead) is neither listed nor
+reschedulable at one poll, and is simply compared again at the next. The generation trigger does not converge that
+way: the poll caches the new `generation` whether or not the reschedule happened, so a bump whose instance is
+picked, or loses db-scheduler's optimistic-version race, MAY go without a reschedule when its derived schedule is
+unchanged. The cost is timing only — the instance keeps its current next execution time and failure counters — since
+the schedule it stores is already the one the new declaration derives, and the new declaration is cached and read at
+the next fire. A restart alone SHALL NOT reschedule an instance whose stored schedule already matches, because
+rescheduling a cron instance moves an overdue fire to its next slot and clears its failure counters. A pipeline
+whose reconcile failed SHALL still be cached at its current declaration: an uncached pipeline has its queued work
+dropped irreversibly by the workers, and the create path and the stored-schedule comparison retry it on the next
+poll. When a pipeline is no longer present in the feed (deleted, or no longer servable), is **stopped**, or is no
+longer routed to a given task name, the runner SHALL cancel that instance. When the pipeline left the feed entirely
+it SHALL also release its per-pipeline resources: the DIAL rate limiter's bucket, its per-pipeline metric gauges,
+and the dead-letter breaker's failure count. Each is an in-memory map keyed by pipeline name, so leaving an entry
+behind both grows without bound and hands a recreated pipeline the failure count it left behind. A **stopped**
+pipeline stays cached, so the runner SHALL release its per-pipeline metric gauges (a stopped pipeline's lag would
+otherwise climb with nothing to move it) and keep the rest: its rate-limiter bucket and breaker state are small,
+bounded by the registry, and describe a pipeline that is expected back. When a stopped pipeline becomes active
+again, the runner SHALL create its instance afresh, from the schedule its declaration derives, exactly as for a
+first sync. Reconciliation SHALL therefore consider every task name the runner schedules pipelines onto, so a
+pipeline whose `transform.type` changed does not leave a stale instance under its former lane; that re-route is
+reachable by an ordinary declaration patch. A single pipeline's reconcile failure SHALL be isolated (logged and
 skipped) so it cannot abort the whole reconcile and leave orphan tasks or a divergent cache.
 
 #### Scenario: A single pipeline's failure does not abort reconcile
@@ -244,6 +284,19 @@ skipped) so it cannot abort the whole reconcile and leave orphan tasks or a dive
 - **WHEN** a later sync no longer includes that pipeline
 - **THEN** its instance is cancelled and the pipeline is dropped from the cache
 
+#### Scenario: A stopped pipeline's instance is cancelled and it stays cached
+
+- **GIVEN** an active pipeline with an existing recurring task instance
+- **WHEN** a later sync returns it with `enabled: false`
+- **THEN** its instance is cancelled, its per-pipeline gauges are released, and it stays in the cache as stopped
+
+#### Scenario: A restarted pipeline is scheduled again
+
+- **GIVEN** a stopped pipeline with no recurring task instance
+- **WHEN** a later sync returns it with `enabled: true`
+- **THEN** a recurring task instance is created under the task name its `transform.type` selects, on the schedule
+  its declaration derives
+
 #### Scenario: Changed pipeline is rescheduled
 
 - **GIVEN** a cached pipeline with an existing recurring task instance
@@ -259,40 +312,42 @@ skipped) so it cannot abort the whole reconcile and leave orphan tasks or a dive
 
 ### Requirement: Pipeline admission gate
 
-The runner SHALL refuse to cache or schedule a pipeline it provably cannot execute, logging a
-human-readable reason and counting the refusal, so an unexecutable pipeline is visibly absent rather than
-cached as healthy and failing on every fire. The gate SHALL be conservative: it rejects only combinations
-the runner cannot execute — currently a pipeline carrying **no `transform`** at all, a pipeline whose
-trigger is the retired **`on_ingest`** (ADAS migrates and refuses it, so its arrival means a producer the
-contract check should already have refused; the reason SHALL name the kind as retired, and the runner SHALL
-NOT schedule it as either a cron or a fixed delay), a pipeline carrying **no trigger** at all (it has no
-clock to run on), a `schedule` pipeline carrying no `trigger.cron`, or one whose cron is not a valid 6-field
-expression to both of the runner's cron parsers (ADAS stores a valid cron on every row-grain pipeline, so
-either is a producer defect, and refusing it here keeps it out of the cache instead of failing in reconcile on
-every poll), a pipeline of either
-lane declaring no `outputs`, an `llm` transform carrying no top-level `response_schema`, a `sql` transform
-that also declares a model (a contradiction: the lane makes no model call), a `sql` transform declaring any
-`transform.inputs` (a Class-1 derivation renders no request, so there is nothing to substitute into — the
-same rule that refused `vars` before the member moved into the block), an `llm` transform declaring no
-`request_template` and one declaring no `model` (the symmetric pair of the two `sql` arms above), a `sql`
-transform on the `group` trigger (the group lane's unit of work *is* a model call, so the two exclude each other), a group pipeline
-with no group key, a group pipeline whose input
-declares no `version_column` (so it has neither a version to compare nor an activity timestamp, and could
-never be dirty-marked), and a group pipeline whose `ready_when` declares **none** of `signal`, `idle` or
-`max_staleness` (which would be dirty forever and never ready, so the pipeline would silently do nothing)
-— and SHALL NOT reject a pipeline merely for carrying a field the runner does not recognise. A refused
-pipeline SHALL have no recurring task instance under any task name.
+The runner SHALL refuse to cache or schedule a pipeline it provably cannot execute, logging a human-readable reason
+and counting the refusal, so an unexecutable pipeline is visibly absent rather than cached as healthy and failing on
+every fire. The gate SHALL be conservative: it rejects only combinations the runner cannot execute — currently a
+pipeline carrying **no `transform`** at all, a pipeline whose trigger is the retired **`on_ingest`** (ADAS migrates
+and refuses it, so its arrival means a producer the contract check should already have refused; the reason SHALL
+name the kind as retired, and the runner SHALL NOT schedule it as either a cron or a fixed delay), a pipeline
+carrying **no trigger** at all (it has no clock to run on), a `schedule` pipeline carrying no `trigger.cron`, or one
+whose cron is not a valid 6-field expression to both of the runner's cron parsers (ADAS stores a valid cron on every
+row-grain pipeline, so either is a producer defect, and refusing it here keeps it out of the cache instead of
+failing in reconcile on every poll), a pipeline of either lane declaring no `outputs`, an `llm` transform carrying
+no top-level `response_schema`, a `sql` transform that also declares a model (a contradiction: the lane makes no
+model call), a `sql` transform declaring any `transform.inputs` (a Class-1 derivation renders no request, so there
+is nothing to substitute into — the same rule that refused `vars` before the member moved into the block), an `llm`
+transform declaring no `request_template` and one declaring no `model` (the symmetric pair of the two `sql` arms
+above), a `sql` transform on the `group` trigger (the group lane's unit of work *is* a model call, so the two
+exclude each other), a group pipeline with no group key, a group pipeline whose input declares no `version_column`
+(so it has neither a version to compare nor an activity timestamp, and could never be dirty-marked), and a group
+pipeline whose `ready_when` declares **none** of `signal`, `idle` or `max_staleness` (which would be dirty forever
+and never ready, so the pipeline would silently do nothing) — and SHALL NOT reject a pipeline merely for carrying a
+field the runner does not recognise. A refused pipeline SHALL have no recurring task instance under any task name.
 
-The empty-`outputs` refusal SHALL apply to **both** lanes off the same member, because both read it: `outputs` is the resolved mapping for a model-calling pipeline and the derivation set for a Class-1
-one. The stated reason SHALL still distinguish them, because the consequences differ. A Class-1 pipeline
-with no outputs derives nothing. A pipeline that is **not** Class-1 — one the runner routes to a lane that
-makes a model call, on either the row or the group grain — is the most expensive defect the gate guards
-against, and the only silent one: with an empty mapping the output mapper returns no columns, the worker
-still builds a write row from the grain key and the provenance columns alone, and that row is written.
-Against the target enrichment's `ReplacingMergeTree` an all-NULL row at an existing grain key **replaces a
-label that has already been paid for** — with no exception, no dead-letter item, no retry, and the model
-call made and charged first. Every other outcome the gate prevents merely wastes work; this one destroys
-data. The runner SHALL enforce it locally even where ADAS also refuses to serve such a pipeline, because a
+The gate SHALL apply to a stopped (`enabled: false`) entry exactly as to an active one. A stopped pipeline
+the gate refuses stays out of the cache, so it is absent rather than stopped, and its queued work takes the
+absent-pipeline path. Admitting it would hold work for a declaration the runner already knows it cannot execute,
+and a restart of it would only reach the same refusal.
+
+The empty-`outputs` refusal SHALL apply to **both** lanes off the same member, because both read it: `outputs` is
+the resolved mapping for a model-calling pipeline and the derivation set for a Class-1 one. The stated reason SHALL
+still distinguish them, because the consequences differ. A Class-1 pipeline with no outputs derives nothing. A
+pipeline that is **not** Class-1 — one the runner routes to a lane that makes a model call, on either the row or the
+group grain — is the most expensive defect the gate guards against, and the only silent one: with an empty mapping
+the output mapper returns no columns, the worker still builds a write row from the grain key and the provenance
+columns alone, and that row is written. Against the target enrichment's `ReplacingMergeTree` an all-NULL row at an
+existing grain key **replaces a label that has already been paid for** — with no exception, no dead-letter item, no
+retry, and the model call made and charged first. Every other outcome the gate prevents merely wastes work; this one
+destroys data. The runner SHALL enforce it locally even where ADAS also refuses to serve such a pipeline, because a
 remote invariant is not a safe guard for a local, irreversible loss.
 
 The refusal SHALL test the pipeline's **`outputs` list** — the resolved mapping saying which physical
@@ -442,6 +497,12 @@ work-item identity requirements in `incremental-scan` and `group-enrichment`.
   `transform.inputs` entry
 - **THEN** the pipeline is refused, is absent from the pipeline cache, and has no recurring task
   instance, because a Class-1 derivation renders no request
+
+#### Scenario: A stopped pipeline is held to the same gate
+
+- **WHEN** a sync returns a pipeline with `enabled: false` whose declaration the gate refuses
+- **THEN** the pipeline is refused with the same reason an enabled one would get, and is absent from the
+  pipeline cache rather than cached as stopped
 
 #### Scenario: An unrecognised field does not disable a pipeline
 
@@ -700,7 +761,7 @@ the old one's scan cursor and skip history. `generation` cannot tell the two apa
 often climbs back to the old value; `created_at` can, because ADAS sets it once at registration and never changes it.
 
 The runner SHALL record the `created_at` it last saw for each name on that name's `pipeline_cursor` row and, on every
-poll and for every admitted pipeline, before any scheduling:
+poll and for every admitted pipeline, active or stopped, before any scheduling:
 
 - where no value is recorded (no row, or a row from before the column), record the feed's value and reset nothing —
   except for a row from before the column last written before the feed's `created_at`, which belonged to a
@@ -714,8 +775,9 @@ poll and for every admitted pipeline, before any scheduling:
   a generation change would. When the compare-and-set finds the row no longer recording the value read, another
   process has already reset it, and nothing persisted SHALL be touched.
 
-A feed entry without `created_at` SHALL be neither recorded nor reset. A breaker pause SHALL be lifted by the reset
-and an operator pause SHALL be kept, since an operator's stop must survive anything the runner concludes. When only
+A feed entry without `created_at` SHALL be neither recorded nor reset. A breaker pause SHALL be lifted by the reset.
+The runner holds no operator stop to keep: a stop is ADAS's `enabled: false`, which the reset does not touch, so a
+recreated pipeline that arrives disabled is reset and stays stopped. When only
 the cached declaration's `created_at` differs, the persisted state having already been reset by another process
 during a rolling-update overlap, the runner SHALL reset its in-memory state only, logged at INFO and not counted; the
 other process has already rescheduled the shared recurring instance. A reset that fails SHALL be isolated to its
@@ -742,7 +804,8 @@ re-used-name acknowledgement in ADAS covers what that leaves under the name on t
 
 #### Scenario: Disable and re-enable keeps the state
 
-- **WHEN** a pipeline leaves the feed and returns at a higher generation with the same `created_at`
+- **WHEN** a pipeline is disabled and later re-enabled in ADAS, staying in the feed at the same generation with
+  the same `created_at`
 - **THEN** its cursor and group state are unchanged
 
 #### Scenario: Recreation across polls resets the state
@@ -757,11 +820,11 @@ re-used-name acknowledgement in ADAS covers what that leaves under the name on t
 - **WHEN** consecutive polls report the same name at the same generation with different `created_at` values
 - **THEN** the state is reset exactly as for a recreation across polls
 
-#### Scenario: An operator pause survives the reset
+#### Scenario: A recreated pipeline that arrives disabled stays stopped
 
-- **GIVEN** an operator pause on a pipeline
-- **WHEN** the pipeline is recreated
-- **THEN** the pause is still in place after the reset
+- **GIVEN** a pipeline deleted and registered again under the same name, still disabled in ADAS
+- **WHEN** a poll reports it with a different `created_at` and `enabled: false`
+- **THEN** its state is reset, it is cached as stopped, and no recurring task instance is created for it
 
 #### Scenario: A legacy row older than the pipeline is reset
 
@@ -775,3 +838,4 @@ re-used-name acknowledgement in ADAS covers what that leaves under the name on t
 - **GIVEN** two processes that both read the old `created_at`, one of which has already reset the pipeline
 - **WHEN** the other one runs its reset
 - **THEN** the compare-and-set matches no row, and the new pipeline's cursor, groups and queued work are kept
+

@@ -58,9 +58,9 @@ class RunVocabularyTest {
 
     /** The database constrains the column to exactly this set; a drift between the two is a migration. */
     @Test
-    void pauseReasonsAreTheSevenTheSchemaAdmits() {
+    void pauseReasonsAreTheEightTheSchemaAdmits() {
         assertThat(Arrays.stream(BackfillPauseReason.values()).map(BackfillPauseReason::dbValue))
-                .containsExactly("operator", "pipeline_paused_operator", "pipeline_paused_breaker",
+                .containsExactly("operator", "pipeline_paused_operator", "pipeline_paused_breaker", "pipeline_stopped",
                         "spend_budget_exhausted", "cursor_stalled", "pipeline_absent", "pipeline_changed");
     }
 

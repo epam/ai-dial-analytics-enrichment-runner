@@ -59,7 +59,7 @@ class JwtAuthIntegrationTest {
 
     @Test
     void mutatingEndpointsRequireCredential() throws Exception {
-        mockMvc.perform(post("/v1/pipelines/r1/pause")).andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/v1/pipelines/r1/resume")).andExpect(status().isUnauthorized());
         mockMvc.perform(post("/v1/dlq/requeue").param("pipeline_name", "r1")).andExpect(status().isUnauthorized());
         mockMvc.perform(post("/v1/backfills/run-1/cancel")).andExpect(status().isUnauthorized());
     }
@@ -84,9 +84,9 @@ class JwtAuthIntegrationTest {
 
     @Test
     void fullAdminMayInvokeMutatingEndpoint() throws Exception {
-        // Pipeline r1 is not cached, so this resolves to a 404 from the controller — the point is that it got
+        // Pipeline r1 is not paused, so this resolves to a 409 from the controller — the point is that it got
         // past authorization rather than being refused with a 401 or 403.
-        mockMvc.perform(post("/v1/pipelines/r1/pause").header(HttpHeaders.AUTHORIZATION, "Bearer " + FULL_ADMIN_TOKEN))
+        mockMvc.perform(post("/v1/pipelines/r1/resume").header(HttpHeaders.AUTHORIZATION, "Bearer " + FULL_ADMIN_TOKEN))
                 .andExpect(status().is(not(401)))
                 .andExpect(status().is(not(403)));
     }

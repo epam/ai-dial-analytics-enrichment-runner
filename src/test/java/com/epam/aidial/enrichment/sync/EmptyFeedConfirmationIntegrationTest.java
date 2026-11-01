@@ -19,6 +19,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.absent;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
@@ -167,7 +168,7 @@ class EmptyFeedConfirmationIntegrationTest {
     private void stubPipelines(String pipelineObjects) {
         ADAS.stubFor(get(urlPathEqualTo("/v1/pipelines"))
                 .withQueryParam("kind", equalTo("enrich"))
-                .withQueryParam("enabled", equalTo("true"))
+                .withQueryParam("enabled", absent())
                 .withQueryParam("view", equalTo("compiled"))
                 .willReturn(okJson("{\"pipelines\":[" + pipelineObjects + "]}")));
     }

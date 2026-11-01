@@ -5,9 +5,7 @@ Re-driving a pipeline's history on an independent cursor: a full replay, or a ru
 [from, to] version window (the mechanism for re-applying a declaration edit — a pipeline `generation`
 bump — to a range). Covers all three execution lanes, runs in its own priority lane below live work,
 and is pausable, resumable and cancellable.
-
 ## Requirements
-
 ### Requirement: Full-replay backfill on an independent cursor
 
 The runner SHALL run a backfill that re-drives a pipeline's history on its own cursor and progress in
@@ -26,8 +24,8 @@ The backfill SHALL drive whichever read its pipeline's kind requires, matching t
 
 A backfill SHALL drain batch by batch, advancing its cursor and row count each batch, and SHALL mark the run
 done when no more pages remain. It SHALL honour the same enqueue guards as the live path: it SHALL record page
-dead-letter rates to the DLQ circuit breaker and SHALL pause the run when its pipeline is paused (by an operator or
-the breaker) or over its daily spend budget; a page that reports `has_more` but does not advance the cursor
+dead-letter rates to the DLQ circuit breaker and SHALL pause the run when its pipeline is stopped in ADAS, paused by
+the breaker, or over its daily spend budget; a page that reports `has_more` but does not advance the cursor
 SHALL pause the run for investigation rather than looping, and SHALL leave the run's stored cursor as it was
 rather than clearing it — a cleared cursor would restart the run from the beginning of its window on resume.
 
@@ -59,6 +57,13 @@ evaluated — the evaluation follows on the sweep's schedule and under its gates
 - **GIVEN** a running backfill whose pipeline becomes paused (e.g. the DLQ circuit breaker trips)
 - **WHEN** the next batch runs
 - **THEN** the run is paused and no further pages are drained
+
+#### Scenario: A backfill pauses when its pipeline is stopped
+
+- **GIVEN** a running backfill whose pipeline is disabled in ADAS, and a sync that caches it as stopped
+- **WHEN** the next batch runs
+- **THEN** the run is paused with the `pipeline_stopped` reason, its committed cursor is unchanged, and no further
+  pages are drained
 
 #### Scenario: A bounded backfill touches only its window
 
@@ -136,15 +141,15 @@ pipeline's `running` conflict. The refusal SHALL be server-side for the same rea
 from `curl` as well as from a client, and a client's own state machine cannot close the race between a polled
 listing and the run that finished while it was on screen.
 
-**At most one batch SHALL advance a run, and only while it is running.** Each page's commit SHALL advance the
-run only if the run is still `running`, its stored cursor is still the one the page was read from, and its
-pinned pipeline generation is still the one the batch drains under; when any has changed, the page's commit — its enqueued work and its dead letters included — SHALL be rolled
-back and the batch SHALL stop without chaining a successor or recording a failure. This is what makes every
-other rule here hold under concurrency. A batch reads the run once and then drains many pages; an operator
-who cancels meanwhile has taken the later decision, and without the check the batch would keep enqueuing
-paid work after the cancel. A resume, a retried batch and a batch revived after a crash can each be alive
-for the same run at once, and without the check two of them would drain it twice. With it, extra executions
-cost at most one wasted source read each.
+**At most one batch SHALL advance a run, and only while it is running.** Each page's commit SHALL advance the run
+only if the run is still `running`, its stored cursor is still the one the page was read from, and its pinned
+pipeline generation is still the one the batch drains under; when any has changed, the page's commit — its enqueued
+work and its dead letters included — SHALL be rolled back and the batch SHALL stop without chaining a successor or
+recording a failure. This is what makes every other rule here hold under concurrency. A batch reads the run once and
+then drains many pages; an operator who cancels meanwhile has taken the later decision, and without the check the
+batch would keep enqueuing paid work after the cancel. A resume, a retried batch and a batch revived after a crash
+can each be alive for the same run at once, and without the check two of them would drain it twice. With it, extra
+executions cost at most one wasted source read each.
 
 The runner's **own** transitions — pausing at a gate, marking a run done — SHALL likewise take effect only on a
 run that is still `running` (a gate's pause, only on one still pinned to the generation the batch read), and
@@ -162,7 +167,8 @@ chain. Any older execution that later fires is stopped by the commit check above
 
 A backfill SHALL NOT be started or resumed into a condition that would pause it on its first batch. With the
 pipeline cache populated: a pipeline absent from the cache SHALL return `404 not_found`; a pipeline that is
-paused, or over its daily spend budget, SHALL return `409 backfill_conflict` naming the condition; and a
+stopped, paused by the breaker, or over its daily spend budget, SHALL return `409 backfill_conflict` naming the
+condition; and a
 pipeline that already has a `running` run SHALL return `409` naming that run's id, so the operator can
 inspect the thing blocking them without a second query. The database SHALL enforce at most one `running`
 run per pipeline, so two concurrent starts, or a start racing a resume, cannot both succeed; the loser of
@@ -251,7 +257,7 @@ property on the run body is the one place the identity surfaces there.
 
 #### Scenario: A backfill is not started or resumed into a gate
 
-- **GIVEN** a pipeline that is paused, or is over its daily spend budget
+- **GIVEN** a pipeline that is stopped, paused by the breaker, or over its daily spend budget
 - **WHEN** an operator starts a backfill for it or resumes one of its paused runs
 - **THEN** the response is `409` naming the condition, and no run is created or set running
 
@@ -325,35 +331,36 @@ the backfill's committer refuse on it, rather than the refusal living only in th
 
 A paused backfill run SHALL record the condition that paused it and the instant the pause began, and SHALL
 report both on the run. The reason SHALL be drawn from a closed set, constrained by the database, covering
-every site that pauses a run: an operator's request, the pipeline being paused by an operator, the pipeline
-being paused by the DLQ circuit breaker, the daily spend budget being exhausted, a cursor that did not
+every site that pauses a run: an operator's request, the pipeline being stopped in ADAS (`pipeline_stopped`), the
+pipeline being paused by the DLQ circuit breaker, the daily spend budget being exhausted, a cursor that did not
 advance, the pipeline being absent from the cache, and the pipeline's declaration having changed since the
-run was started.
+run was started. The set SHALL keep admitting `pipeline_paused_operator`, which runs paused before the runner's
+operator pause was removed may still carry, and the runner SHALL NOT write it any more.
 
-One word is not an answer. The conditions call for materially different operator responses. The condition
-behind a spend pause lifts at 00:00 UTC; the condition behind a breaker pause lifts when the breaker's window
-elapses, if breaker expiry is enabled; an operator's pipeline pause lifts when a human decides; **a cursor
-stall lifts only when somebody fixes something** — resuming it without investigating re-enters the same
-non-advancing page and re-pauses, which is why the guard exists at all. In every case it is the *condition*
-that lifts: the run itself stays paused until an operator resumes it. The runner computes the distinction at
-the moment it pauses and, before this requirement, wrote it only to a log line.
+One word is not an answer. The conditions call for materially different operator responses. The condition behind a
+spend pause lifts at 00:00 UTC; the condition behind a breaker pause lifts when the breaker's window elapses, if
+breaker expiry is enabled; a stopped pipeline's condition lifts when someone re-enables it in ADAS; **a cursor stall
+lifts only when somebody fixes something** — resuming it without investigating re-enters the same non-advancing page
+and re-pauses, which is why the guard exists at all. In every case it is the *condition* that lifts: the run itself
+stays paused until an operator resumes it. The runner computes the distinction at the moment it pauses and, before
+this requirement, wrote it only to a log line.
 
 The reason SHALL record what **paused** the run, not what currently holds it. After a restart clears the
-in-memory pipeline-pause registry, a run paused for a pipeline pause still reports that reason; the resume
+in-memory pipeline-pause registry, a run paused for a breaker pause still reports that reason; the resume
 checks in "Backfill runs are pausable, resumable and cancellable" are what answer whether it can run now.
 
-A pipeline pause's origin SHALL be recorded as its own reason value rather than collapsed into a single
-"pipeline paused" value. The runner holds the origin at pause time, and the alternative — re-deriving it from
-the paused-pipeline listing — fails in precisely the case where the question is hardest, because that listing
-is in-memory and a restart clears it while the run's pause survives.
+A stopped pipeline and a breaker-paused one SHALL be recorded as different reason values rather than collapsed
+into a single "pipeline paused" value. The runner knows which at pause time, and the alternative — re-deriving it
+later — fails in precisely the case where the question is hardest: the breaker's pause is in-memory and a restart
+clears it while the run's pause survives, and a stop may have been lifted since.
 
 The reason and the instant SHALL be present **only while the run is paused**, and always together. Resuming
 a run SHALL clear both in the same statement that sets it running, and cancelling a paused run SHALL clear
 both in the statement that cancels it. A stale reason on a running run is worse than no reason, because it
 reads as current; on a cancelled run it would answer "why is this paused?" for a run that is not.
 
-The log lines SHALL remain, naming the actual origin of a pipeline pause. They are the record of the event;
-the stored reason is the record of the condition, and `runner-ops` already requires those to be reported
+The log lines SHALL remain, naming whether the pipeline was stopped or paused by the breaker. They are the record of
+the event; the stored reason is the record of the condition, and `runner-ops` already requires those to be reported
 differently.
 
 #### Scenario: A paused run reports which condition paused it
@@ -364,11 +371,17 @@ differently.
 
 #### Scenario: A pipeline pause's origin survives on the run
 
-- **GIVEN** one run paused because an operator paused its pipeline and one paused because the circuit breaker
-  did
+- **GIVEN** one run paused because its pipeline was stopped in ADAS and one paused because the circuit breaker
+  paused its pipeline
 - **WHEN** each run is inspected, including after a restart
-- **THEN** each reports a different reason, and neither depends on the in-memory paused-pipeline listing
-  still holding an entry
+- **THEN** one reports `pipeline_stopped` and the other `pipeline_paused_breaker`, and neither depends on the
+  in-memory paused-pipeline listing still holding an entry
+
+#### Scenario: A run paused before the operator pause was removed keeps its reason
+
+- **GIVEN** a run stored paused with `pipeline_paused_operator`
+- **WHEN** the run is inspected after the upgrade
+- **THEN** it still reports `pipeline_paused_operator`, and resuming it is answered by the current resume checks
 
 #### Scenario: A cursor stall is distinguishable from an ordinary pause
 
@@ -410,8 +423,12 @@ differently.
 
 When a backfill batch finds its pipeline absent from a **populated** pipeline cache, the runner SHALL pause
 the run with the absent-pipeline reason rather than returning without changing state. A pipeline is absent
-when it is disabled or deleted in ADAS, and also when the runner refuses it as unexecutable, since a refused
-pipeline is kept out of the cache; the log line and the reason's documentation SHALL say both. While the
+when it is deleted in ADAS or ADAS no longer serves it, and also when the runner refuses it as unexecutable,
+since a refused pipeline is kept out of the cache; the log line and the reason's documentation SHALL say both. A
+pipeline **disabled** in ADAS is not absent: it stays cached as stopped, and a batch that finds it stopped SHALL
+pause the run with the `pipeline_stopped` reason instead, keeping its committed cursor. Resuming such a run while
+the pipeline is still stopped SHALL return `409 backfill_conflict` naming the stop, because the pipeline exists
+and only its state is wrong. While the
 pipeline remains absent, resuming that run SHALL return `404 not_found`, matching the runner's answer to
 starting a backfill for a pipeline absent from the cache.
 
@@ -426,17 +443,17 @@ execution that returns normally is removed and nothing schedules the next link: 
 row still read `running`, which made the run un-resumable by its own state guard and blocked every future
 backfill for that pipeline behind a permanent `409`. No error was raised, no counter moved, and the run's row
 was indistinguishable from a healthy slow one. It was also reached by the most intuitive way of stopping a
-runaway backfill, which is disabling the pipeline in ADAS.
+runaway backfill, which is disabling the pipeline in ADAS — the path that now pauses with `pipeline_stopped`.
 
-The runner SHALL NOT resume such a run automatically when the pipeline returns. A pipeline's absence is
-almost always an operator's decision taken in ADAS for reasons the runner does not hold, and a pipeline that
-reappears has at minimum been re-enabled and may carry an edited declaration — whether the remainder of the
+The runner SHALL NOT resume such a run automatically when the pipeline returns or is re-enabled. A pipeline's
+absence or stop is almost always an operator's decision taken in ADAS for reasons the runner does not hold, and a
+pipeline that reappears or restarts may carry an edited declaration — whether the remainder of the
 window should be re-driven under it is a judgement the runner cannot make. The run keeps its cursor and its
 window and waits.
 
 #### Scenario: A batch whose pipeline is gone pauses the run
 
-- **GIVEN** a running backfill whose pipeline is disabled or deleted in ADAS and has left a populated cache
+- **GIVEN** a running backfill whose pipeline is deleted in ADAS and has left a populated cache
 - **WHEN** its next batch runs
 - **THEN** the run is paused with the absent-pipeline reason and its committed cursor is unchanged
 
@@ -462,9 +479,21 @@ window and waits.
 #### Scenario: A returned pipeline does not restart the run by itself
 
 - **GIVEN** a run paused with the absent-pipeline reason
-- **WHEN** the pipeline is re-enabled and the next sync returns it to the cache
+- **WHEN** the runner admits the pipeline again and the next sync returns it to the cache
 - **THEN** the run stays paused until an operator resumes it, and resuming then drains from the committed
   cursor
+
+#### Scenario: Resuming into a still-stopped pipeline is a conflict
+
+- **GIVEN** a run paused with the `pipeline_stopped` reason whose pipeline is still disabled in ADAS
+- **WHEN** an operator resumes it
+- **THEN** the response is `409 backfill_conflict` naming the stop and the run stays paused
+
+#### Scenario: A restarted pipeline does not restart the run by itself
+
+- **GIVEN** a run paused with the `pipeline_stopped` reason
+- **WHEN** the pipeline is re-enabled in ADAS and the next sync caches it as active
+- **THEN** the run stays paused until an operator resumes it, and resuming then drains from the committed cursor
 
 ### Requirement: A backfill whose pipeline declaration changes mid-run pauses
 
@@ -647,3 +676,4 @@ up past a page.
 - **GIVEN** a run that is both listed and fetched by id
 - **WHEN** the two responses are compared
 - **THEN** the run is represented identically in each
+

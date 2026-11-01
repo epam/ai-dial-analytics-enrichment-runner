@@ -64,7 +64,7 @@ curl -s localhost:5100/v1/pipelines/cache        # the pipeline appears with its
 # The runner reads the COMPILED projection, and so must you when checking what it sees. The default,
 # view=source, is the authored declaration: no derived response_schema, no grain_key, no version_column
 # and no resolved outputs — a different object, not a degraded one.
-curl -s 'localhost:5000/v1/pipelines?kind=enrich&enabled=true&view=compiled' | jq '.pipelines[0]'
+curl -s 'localhost:5000/v1/pipelines?kind=enrich&view=compiled' | jq '.pipelines[0]'
 ```
 
 ## 3. Seed source rows and let the runner enrich
@@ -121,11 +121,17 @@ key, so the joined result is identical — exactly-once *effect* despite at-leas
   accepted), with `limit` clamped to 500. `curl -s 'localhost:5100/v1/backfills?state=running' | jq` answers
   "which run is holding the `409`"; `?state=paused&paused_reason=cursor_stalled` is the triage query. A
   misspelled state or reason is a `400` naming the permitted values.
-- **Pause**: a pipeline auto-pauses if its dead-letter rate trips the DLQ circuit breaker. An auto-pause
-  lifts itself after `DLQ_BREAKER_PAUSE_FOR` (widening on each consecutive trip, to `DLQ_BREAKER_PAUSE_MAX`);
-  an operator pause never expires. `GET /v1/pipelines/paused` reports each pause's `pipeline_name`, `origin`,
-  `reason`, `since` and `resumes_at`, and `POST /v1/pipelines/{name}/resume` lifts either. Pauses are held in
-  memory: a restart lifts them all.
+- **Stop and start**: a pipeline is stopped and started in ADAS, with `PATCH /v1/pipelines/{name}`
+  `{"enabled": false}` (or `true`) — its single run control. The runner has no pause of its own. Within one poll it
+  cancels a stopped pipeline's recurring fire and **holds** its queued chunks, group items and writes (rescheduled
+  without consuming an attempt, never dropped or archived); they run once it is re-enabled. A write already past its
+  model call when the stop lands is refused by ADAS with `409 pipeline_conflict`, and is held the same way.
+  `GET /v1/pipelines/cache` lists the pipeline with `enabled: false`, and its runtime view reads `stopped`.
+- **Breaker pause**: a pipeline auto-pauses if its dead-letter rate trips the DLQ circuit breaker. The pause lifts
+  itself after `DLQ_BREAKER_PAUSE_FOR` (widening on each consecutive trip, to `DLQ_BREAKER_PAUSE_MAX`).
+  `GET /v1/pipelines/paused` reports each pause's `pipeline_name`, `origin` (always `breaker`), `reason`, `since`
+  and `resumes_at`, and `POST /v1/pipelines/{name}/resume` lifts one early — a `409 pipeline_not_paused` when the
+  breaker has not paused the pipeline. Pauses are held in memory: a restart lifts them all.
 - **Runtime view**: `GET /v1/pipelines/{name}/runtime` answers "what is this pipeline doing right now?" in one shape
   for every lane. A section that does not apply to the lane is absent, and so is a field the runner does not
   currently know. The last error, `has_more` and `caught_up_at` are held in memory and are unknown after a restart
@@ -403,13 +409,14 @@ back and nothing further is enqueued.
 | Action | Effect |
 | --- | --- |
 | second `POST …/backfill`, or a resume, while a run is `running` | `409 backfill_conflict` naming the running run's id; a `paused` run does *not* block a new one |
-| start or resume into a **paused pipeline**, or one **over its spend budget** | `409 backfill_conflict` naming the condition (the budget resets at 00:00 UTC); no run is created or set running |
+| start or resume into a **stopped** or **breaker-paused** pipeline, or one **over its spend budget** | `409 backfill_conflict` naming the condition (the budget resets at 00:00 UTC); no run is created or set running |
 | start or resume in the seconds after a boot, before the first pipeline sync | `503 pipeline_cache_cold` — retry; the runner does not yet know whether the pipeline exists |
 | `…/cancel` | terminal: never fires, `rows_done` stays 0, and `…/resume` or a second `…/cancel` on it is a `409` |
 | `…/pause` on a `done`, `cancelled` or `paused` run | `409`; state and `finished_at` unchanged |
 | `…/pause` then `…/resume` | the run keeps its window and its cursor and finishes from where it stopped |
-| a pipeline **paused mid-run** | the next page flips the run to `paused` with `paused_reason` `pipeline_paused_operator` or `pipeline_paused_breaker`; the pipeline *and* the run must both be resumed |
-| a pipeline **disabled or deleted** in ADAS mid-run (or refused as unexecutable) | `paused` / `pipeline_absent`, committed cursor kept; resume is `404` while it is absent and drains from the cursor once it is back. Nothing resumes it automatically |
+| a pipeline **stopped** (disabled in ADAS) mid-run | `paused` / `pipeline_stopped`, committed cursor kept; resume is `409` while it is stopped. Re-enable it in ADAS, then resume the run — nothing resumes it automatically |
+| a pipeline **breaker-paused** mid-run | `paused` / `pipeline_paused_breaker`; resume the run once the pause lifts |
+| a pipeline **deleted** in ADAS mid-run (or refused as unexecutable) | `paused` / `pipeline_absent`, committed cursor kept; resume is `404` while it is absent and drains from the cursor once it is back. Nothing resumes it automatically |
 | a pipeline **edited** mid-run (its `generation` moved) | `paused` / `pipeline_changed` before the next page. Resume adopts the new generation and continues; or cancel and re-run the window |
 | a batch that **keeps failing** (ADAS `422`, a page missing the grain column, …) | the run stays `running`; `last_error` names the cause (`"ADAS 422 pipeline_validation_failed"`, never a body) and `runner_backfill_batch_failures_total{pipeline=…}` rises while the batch retries on the worker backoff. There is no terminal `failed`: fix the cause, or cancel — a cancelled run keeps its `last_error` |
 | a cursor that does not advance | `paused` / `cursor_stalled` — investigate before resuming, or it re-enters the same page |
@@ -477,25 +484,29 @@ A **backfill batch** due in that window is held the same way — `Backfill batch
 …` — and its run stays `running` with no `paused_reason` and no `last_error`. It is only paused as
 `pipeline_absent` once a populated cache genuinely lacks the pipeline.
 
+A **stopped** pipeline's items are held the same way, for as long as it stays stopped: `Holding chunk …: the pipeline
+is stopped (disabled in ADAS) until it is re-enabled`. That is the intended steady state of a stop, not a fault.
+
 ### A pipeline that is paused and says nothing
 
 ```bash
 curl -s localhost:5100/v1/pipelines/paused | jq
-curl -s localhost:5100/actuator/prometheus | grep runner_pipelines_paused
+curl -s localhost:5100/actuator/prometheus | grep -E 'runner_pipelines_(paused|stopped)'
 ```
 
-`runner_pipelines_paused_auto` is the alertable one — an operator pause is a legitimate steady state, a
-breaker pause is not. ADAS reports such a pipeline `enabled` with no run position throughout, which is
-indistinguishable from "working, nothing new to do": the runner's own listing and that gauge are the only
-places a breaker pause is visible.
+`runner_pipelines_paused_auto` (equal to `runner_pipelines_paused`, now that only the breaker pauses) is the
+alertable one — a breaker pause has no legitimate steady state. `runner_pipelines_stopped` counts pipelines stopped
+in ADAS, which is a decision, not a condition to alert on. ADAS reports a breaker-paused pipeline `enabled` with no
+run position throughout, which is indistinguishable from "working, nothing new to do": the runner's own listing, its
+runtime view and that gauge are the only places a breaker pause is visible.
 
 ### A pipeline recreated under the same name
 
 A delete followed by a create under the same name (a catalog import, or `DELETE` + `POST`) is a new pipeline, and
 the runner tells it apart by ADAS's `created_at`, which it records on the cursor row. On the first poll that reports a
 different value it resets the name: the cursor is emptied, `group_state` rows and unpicked work items are deleted,
-running and paused backfills are cancelled, a breaker pause is lifted (an operator pause is kept), and the new
-pipeline scans from the beginning. Dead letters and same-day spend stay under the name.
+running and paused backfills are cancelled, a breaker pause is lifted, and the new pipeline scans from the
+beginning — or, if it arrives disabled, is cached as stopped. Dead letters and same-day spend stay under the name.
 
 ```bash
 # The ADAS side: delete, then register again under the same name (enabled, so it enters the feed).
@@ -710,5 +721,5 @@ Check `curl -s localhost:5100/v1/pipelines/paused` in the same pass: enough of t
 DLQ circuit breaker, which pauses the pipeline until `DLQ_BREAKER_PAUSE_FOR` elapses (doubling on each consecutive trip, up to
 `DLQ_BREAKER_PAUSE_MAX`). A pause does not block a
 requeued work item — the pause gates *enqueueing*, in the scan, sweep and backfill — so the requeue lands either
-way, but the pipeline stays out of the live path until the pause lifts or you call
+way, but the pipeline stays out of the live path until the pause lifts or you lift it early with
 `curl -s -X POST localhost:5100/v1/pipelines/<name>/resume`.

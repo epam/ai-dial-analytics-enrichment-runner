@@ -33,7 +33,7 @@ public final class OperatorActionLog {
     /**
      * Logs one operator action.
      *
-     * @param action   the verb, e.g. {@code pipeline_pause}
+     * @param action   the verb, e.g. {@code pipeline_resume}
      * @param pipeline the pipeline acted on, or {@code null} when the action names none
      * @param target   the affected run or item as {@code key=value} pairs, or {@code null} when there is none
      */

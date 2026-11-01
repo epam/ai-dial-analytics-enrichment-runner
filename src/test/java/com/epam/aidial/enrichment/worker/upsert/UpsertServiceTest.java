@@ -1,6 +1,7 @@
 package com.epam.aidial.enrichment.worker.upsert;
 
 import com.epam.aidial.enrichment.adas.AdasCompatibilityState;
+import com.epam.aidial.enrichment.adas.AdasContract;
 import com.epam.aidial.enrichment.adas.AdasUpsertClient;
 import com.epam.aidial.enrichment.adas.AdasWorkGate;
 import com.epam.aidial.enrichment.adas.dto.PipelineDto;
@@ -8,6 +9,7 @@ import com.epam.aidial.enrichment.dlq.DlqCircuitBreaker;
 import com.epam.aidial.enrichment.dlq.DlqStage;
 import com.epam.aidial.enrichment.exception.AdasIncompatibleHoldException;
 import com.epam.aidial.enrichment.exception.AdasTransportException;
+import com.epam.aidial.enrichment.exception.PipelineStoppedHoldException;
 import com.epam.aidial.enrichment.exception.TransientChunkException;
 import com.epam.aidial.enrichment.observability.RunnerMetrics;
 import com.epam.aidial.enrichment.observability.RunnerTracer;
@@ -25,6 +27,7 @@ import com.github.kagkarlsson.scheduler.serializer.JacksonSerializer;
 import io.opentelemetry.api.OpenTelemetry;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.web.client.RestClientResponseException;
 import tools.jackson.databind.json.JsonMapper;
@@ -46,6 +49,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -191,6 +195,70 @@ class UpsertServiceTest {
         verify(dlqItemWriter, times(3)).upsert(archived.capture());
         assertThat(archived.getAllValues()).extracting(DlqItemEntity::getRunId)
                 .containsExactly("run-7", null, "run-7");
+    }
+
+    @Test
+    void stoppedPipelinesWriteIsHeldWithoutCallingAdasArchivingOrCounting() {
+        when(pipelineCache.get(PIPELINE_NAME)).thenReturn(TestPipelines.stopped(
+                TestPipelines.builder(PIPELINE_NAME).generation(GENERATION).build()));
+
+        assertThatThrownBy(() -> service.write("w0", payload())).isInstanceOf(PipelineStoppedHoldException.class);
+
+        verify(upsertClient, never()).upsert(anyString(), anyList());
+        verify(dlqItemWriter, never()).upsert(any());
+        verify(dlqCircuitBreaker, never()).record(anyString(), anyInt(), anyInt());
+    }
+
+    /** Re-enabling at the same generation — ADAS does not move it on a flag-only patch — lets the held write land. */
+    @Test
+    void heldWriteLandsOnceThePipelineIsReEnabledAtTheSameGeneration() {
+        PipelineDto active = TestPipelines.builder(PIPELINE_NAME).generation(GENERATION).build();
+        when(pipelineCache.get(PIPELINE_NAME)).thenReturn(TestPipelines.stopped(active));
+        assertThatThrownBy(() -> service.write("w0", payload())).isInstanceOf(PipelineStoppedHoldException.class);
+
+        when(pipelineCache.get(PIPELINE_NAME)).thenReturn(active);
+        when(upsertClient.upsert(anyString(), anyList())).thenReturn(1);
+        service.write("w0", payload());
+
+        verify(upsertClient).upsert(eq(PIPELINE_NAME), anyList());
+        verify(dlqItemWriter, never()).upsert(any());
+    }
+
+    /**
+     * The stop reached ADAS before this runner's next sync: ADAS refuses the write with 409 {@code pipeline_conflict},
+     * which on this endpoint means only "disabled". Every row of the write would otherwise count against the breaker,
+     * so a stop could trip it, and the paid result would go to the DLQ.
+     */
+    @Test
+    void writeAdasRefusesAsDisabledIsHeldNotDeadLettered() {
+        cachePipeline();
+        when(upsertClient.upsert(anyString(), anyList())).thenThrow(adasRefusal(409, "pipeline_conflict"));
+
+        assertThatThrownBy(() -> service.write("w0", payload())).isInstanceOf(PipelineStoppedHoldException.class);
+
+        verify(dlqItemWriter, never()).upsert(any());
+        verify(dlqCircuitBreaker, never()).record(anyString(), anyInt(), anyInt());
+        verifyNoInteractions(groupStateWriter);
+    }
+
+    @Test
+    void anotherConflictIsStillPermanentRejection() {
+        cachePipeline();
+        when(jsonMapper.writeValueAsString(any())).thenReturn("{}");
+        when(upsertClient.upsert(anyString(), anyList())).thenThrow(adasRefusal(409, "something_else"));
+
+        service.write("w0", payload());
+
+        verify(dlqItemWriter).upsert(any());
+    }
+
+    /** A refusal as ADAS produces it: the contract echo set, and its stable code in the ErrorView body. */
+    private static RestClientResponseException adasRefusal(int status, String code) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.add(AdasContract.HEADER, AdasContract.VERSION_VALUE);
+        return new RestClientResponseException(status + " " + code, status, "Conflict", headers,
+                ("{\"status\":" + status + ",\"error\":\"" + code + "\",\"message\":\"m\"}")
+                        .getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
     }
 
     /** Deserialized the way the queue does it, so the test seeds the shape the old image actually wrote. */
