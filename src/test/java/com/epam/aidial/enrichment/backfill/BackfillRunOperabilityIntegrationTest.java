@@ -424,19 +424,21 @@ class BackfillRunOperabilityIntegrationTest {
     // ---- 7.3 the start and resume gates --------------------------------------------------------------------
 
     @Test
-    void startAndResumeIntoPausedPipelineAreRefused() {
+    void startAndResumeIntoStoppedOrPausedPipelineAreRefused() {
         String name = cache("g-paused");
         RunHistoryEntity run = backfillService.start(name);
         backfillService.pause(run.getId());
         backfillService.cancel(backfillService.start(name).getId());
-        pauseRegistry.pause(name, PauseOrigin.OPERATOR, "paused by an operator");
+        stop(name);
 
+        // A state conflict, not a missing resource: the pipeline is still cached, and runs once re-enabled.
         assertThatThrownBy(() -> backfillService.start(name))
-                .isInstanceOf(BackfillConflictException.class).hasMessageContaining("paused by an operator");
+                .isInstanceOf(BackfillConflictException.class).hasMessageContaining("is stopped");
         assertThatThrownBy(() -> backfillService.resume(run.getId()))
-                .isInstanceOf(BackfillConflictException.class).hasMessageContaining("paused by an operator");
+                .isInstanceOf(BackfillConflictException.class).hasMessageContaining("is stopped");
         assertThat(backfillService.get(run.getId()).getState()).isEqualTo("paused");
 
+        cache(name);
         pauseRegistry.pauseUntil(name, PauseOrigin.BREAKER, "40/50", Instant.now().plusSeconds(600));
         assertThatThrownBy(() -> backfillService.start(name)).hasMessageContaining("DLQ circuit breaker");
     }
@@ -512,26 +514,27 @@ class BackfillRunOperabilityIntegrationTest {
     }
 
     @Test
-    void thePipelinePausesTwoOriginsRecordDifferentReasonsAndLogLines() {
+    void stoppedAndBreakerPausedPipelinesRecordDifferentReasonsAndLogLines() {
         CapturingAppender logs = CapturingAppender.attachAtTrace();
         try {
-            String byOperator = cache("r-op");
-            RunHistoryEntity first = backfillService.start(byOperator);
-            pauseRegistry.pause(byOperator, PauseOrigin.OPERATOR, "paused by an operator");
+            String stopped = cache("r-op");
+            RunHistoryEntity first = backfillService.start(stopped);
+            stop(stopped);
             executor.run(first.getId());
 
-            String byBreaker = cache("r-br", byOperator);
+            String byBreaker = cache("r-br", stopped);
             RunHistoryEntity second = backfillService.start(byBreaker);
             pauseRegistry.pauseUntil(byBreaker, PauseOrigin.BREAKER, "40/50", Instant.now().plusSeconds(600));
             executor.run(second.getId());
 
-            assertReason(first.getId(), BackfillPauseReason.PIPELINE_PAUSED_OPERATOR);
+            assertReason(first.getId(), BackfillPauseReason.PIPELINE_STOPPED);
             assertReason(second.getId(), BackfillPauseReason.PIPELINE_PAUSED_BREAKER);
-            // The reason is stored, so a restart clearing the registry does not erase it.
-            pauseRegistry.resume(byOperator);
+            // The reason is stored, so a restart clearing the registry, or a restart of the pipeline, does not erase it.
             pauseRegistry.resume(byBreaker);
-            assertReason(first.getId(), BackfillPauseReason.PIPELINE_PAUSED_OPERATOR);
-            assertThat(logs.containsText("pipeline r-op was paused by an operator")).isTrue();
+            cache(stopped, byBreaker);
+            assertReason(first.getId(), BackfillPauseReason.PIPELINE_STOPPED);
+            assertReason(second.getId(), BackfillPauseReason.PIPELINE_PAUSED_BREAKER);
+            assertThat(logs.containsText("pipeline r-op is stopped")).isTrue();
             assertThat(logs.containsText("pipeline r-br was paused by the DLQ circuit breaker")).isTrue();
         } finally {
             logs.detach(Level.INFO);
@@ -1065,6 +1068,14 @@ class BackfillRunOperabilityIntegrationTest {
         pipelines.put(name, pipeline(name, 1));
         pipelineCache.replaceAll(pipelines);
         return name;
+    }
+
+    /** Caches {@code name} as ADAS serves it once disabled, keeping every other cached pipeline. */
+    private void stop(String name) {
+        Map<String, PipelineDto> pipelines = new HashMap<>();
+        pipelineCache.getAll().forEach(pipeline -> pipelines.put(pipeline.name(), pipeline));
+        pipelines.put(name, TestPipelines.stopped(pipelines.get(name)));
+        pipelineCache.replaceAll(pipelines);
     }
 
     private static PipelineDto pipeline(String name, long generation) {

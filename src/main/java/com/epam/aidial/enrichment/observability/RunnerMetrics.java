@@ -158,16 +158,18 @@ public class RunnerMetrics {
         this.dlqItemRepository = dlqItemRepository;
         this.groupStateRepository = groupStateRepository;
 
+        // Every cached pipeline, active and stopped alike; the stopped ones are also counted on their own below.
         Gauge.builder("runner.pipelines.cached", pipelineCache, PipelineCache::size).register(registry);
+        // Stopped in ADAS, the pipeline's single run control: a legitimate steady state, so a count to read rather
+        // than an alert condition.
+        Gauge.builder("runner.pipelines.stopped", pipelineCache, PipelineCache::stoppedCount).register(registry);
         // A pipeline the DLQ breaker auto-paused stops enqueueing and says so in one log line, which is not a
         // signal anything watches. The gauge is what makes the pause outlive the line it was logged on: it
-        // stays up until somebody resumes the pipeline, which is exactly the condition worth alerting on.
+        // stays up until the pause lifts, which is exactly the condition worth alerting on.
         Gauge.builder("runner.pipelines.paused", pauseRegistry, PipelinePauseRegistry::pausedCount).register(registry);
-        // Split out because the total cannot carry an alert: an operator pause is a legitimate steady state,
-        // so a rule written against the total is either permanently lit or permanently ignored — and it was
-        // the total that existed while a pipeline sat auto-paused for fourteen hours with every surface
-        // reading healthy. A breaker pause has no legitimate steady state, so "one of these has persisted"
-        // is exactly the alert condition.
+        // The same set now that only the breaker pauses — an operator stops a pipeline in ADAS instead. Kept as its
+        // own series for the alerts written against it: a breaker pause has no legitimate steady state, so "one of
+        // these has persisted" is exactly the alert condition.
         Gauge.builder("runner.pipelines.paused.auto", pauseRegistry, PipelinePauseRegistry::autoPausedCount)
                 .register(registry);
         Gauge.builder("runner.dlq.size", this, m -> m.dlqSize).register(registry);

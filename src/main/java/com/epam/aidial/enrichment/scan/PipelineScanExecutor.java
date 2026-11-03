@@ -77,6 +77,12 @@ public class PipelineScanExecutor {
         // scheduler listener's, and nothing here logs or counts. The catch spans the gates because the spend and
         // backpressure reads query Postgres, and a failure there fails the fire as surely as a failed page does.
         try {
+            // Stopped is normally caught by the sync cancelling the recurring instance; a fire already picked when the
+            // stop was synced lands here.
+            if (!pipeline.enabled()) {
+                log.info("Pipeline {} is stopped; skipping scan", pipelineName);
+                return;
+            }
             if (pauseRegistry.isPaused(pipelineName)) {
                 log.info("Pipeline {} is paused; skipping scan", pipelineName);
                 return;
@@ -144,7 +150,12 @@ public class PipelineScanExecutor {
                 log.warn("Pipeline {} reported more rows but cursor did not advance; halting drain", pipelineName);
                 break;
             }
-            // Re-evaluate the gates each page so a mid-drain trip stops within one page, not one fire.
+            // Re-evaluate the gates each page so a mid-drain trip stops within one page, not one fire. The stop is read
+            // from the cache afresh, since the snapshot this fire started from cannot see a later sync.
+            if (pipelineCache.isStopped(pipelineName)) {
+                log.info("Pipeline {} stopped mid-scan; halting drain after {} page(s)", pipelineName, pages);
+                break;
+            }
             if (pauseRegistry.isPaused(pipelineName)) {
                 log.info("Pipeline {} auto-paused mid-scan; halting drain after {} page(s)", pipelineName, pages);
                 break;

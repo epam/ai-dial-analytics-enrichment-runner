@@ -118,6 +118,21 @@ class PipelineStatusReporterTest {
     }
 
     @Test
+    void stoppedPipelineIsReportedAtInfoAndNeverStalled() {
+        pipelineCache.replaceAll(Map.of(PIPELINE,
+                TestPipelines.stopped(TestPipelines.schedule(PIPELINE, 4, TestPipelines.EVERY_MINUTE))));
+        clock.advance(Duration.ofHours(1));
+
+        reporter.report();
+
+        // A stop is a decision somebody took, not a condition to alarm on.
+        List<LogEvent> lines = pipelineLines();
+        assertThat(lines).hasSize(1);
+        assertThat(lines.getFirst().getLevel()).isEqualTo(Level.INFO);
+        assertThat(message(lines.getFirst())).contains("labels (row, gen 4) | stopped |").doesNotContain("STALLED");
+    }
+
+    @Test
     void freshStartDoesNotCryStall() {
         clock.advance(Duration.ofMinutes(2));
 
@@ -131,18 +146,19 @@ class PipelineStatusReporterTest {
 
     @Test
     void pausedPipelineGetsExactlyOneWarnPerIntervalWithOriginReasonAndAge() {
-        pauseRegistry.pause(PIPELINE, PauseOrigin.OPERATOR, "maintenance");
+        pauseRegistry.pause(PIPELINE, PauseOrigin.BREAKER, "40/50 dead-lettered");
         clock.advance(Duration.ofMinutes(10));
 
         reporter.report();
         assertThat(warnings()).hasSize(1);
-        assertThat(message(warnings().getFirst())).contains("labels (row, gen 4) | PAUSED by operator 10m ago: maintenance |")
+        assertThat(message(warnings().getFirst()))
+                .contains("labels (row, gen 4) | PAUSED by breaker 10m ago: 40/50 dead-lettered |")
                 .doesNotContain("STALLED");
 
         clock.advance(Duration.ofMinutes(5));
         reporter.report();
         assertThat(warnings()).hasSize(2);
-        assertThat(message(warnings().get(1))).contains("PAUSED by operator 15m ago");
+        assertThat(message(warnings().get(1))).contains("PAUSED by breaker 15m ago");
     }
 
     @Test

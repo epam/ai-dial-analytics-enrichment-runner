@@ -4,9 +4,7 @@
 The runner's own signals and how they stay cheap: health probes, a Prometheus scrape endpoint, OTLP export,
 and the discipline that keeps gauges from doing unbounded work on the scrape path or growing unbounded
 cardinality.
-
 ## Requirements
-
 ### Requirement: Health endpoint for liveness and readiness
 
 The service SHALL expose an Actuator health endpoint at `/actuator/health` with `/actuator/health/liveness`
@@ -70,10 +68,11 @@ over the scheduler table (not a deserialization of every pending payload), and a
 a query over a growing table — DLQ size, active-group count, dirty backlog — SHALL be refreshed off the scrape
 path, so scrape latency never becomes a function of table size.
 
-Gauge **cardinality** SHALL stay bounded: per-pipeline gauges SHALL be evicted when a pipeline leaves the cache, and
-no gauge SHALL be tagged by an unbounded identifier. A group key is unbounded, so group-level detail SHALL be
-exposed as aggregates tagged by pipeline, with the per-group view left to spans, the MDC and the pull-based
-introspection endpoint.
+Gauge **cardinality** SHALL stay bounded: per-pipeline gauges SHALL be evicted when a pipeline leaves the cache or
+is stopped, and registered again when it is next active — a stopped pipeline's lag would otherwise read as a stall
+nothing will move — and no gauge SHALL be tagged by an unbounded identifier. A group key is unbounded, so
+group-level detail SHALL be exposed as aggregates tagged by pipeline, with the per-group view left to spans, the MDC
+and the pull-based introspection endpoint.
 
 #### Scenario: A scrape does not deserialize the queue
 
@@ -90,6 +89,12 @@ introspection endpoint.
 
 - **WHEN** the exposed metric set is inspected
 - **THEN** group-level signals appear as per-pipeline aggregates and no series is tagged by an individual group key
+
+#### Scenario: A stopped pipeline's per-pipeline gauges are evicted
+
+- **GIVEN** an active pipeline with a scan-lag series
+- **WHEN** a sync caches it as stopped and the Prometheus endpoint is scraped
+- **THEN** no per-pipeline series carries its name, and the series returns once it is active and scanning again
 
 ### Requirement: Lag reports being caught up as a value
 
@@ -238,8 +243,8 @@ SHALL be covered by a test that drives a real log4j2 event through to a log-reco
 The runner SHALL identify a pipeline by its **name**, under one spelling per signal type, so a metric series,
 a log query and a trace filter can be written from the same value without translation:
 
-- **Gauges** naming the synced set SHALL be `runner.pipelines.cached`, `runner.pipelines.paused` and
-  `runner.pipelines.unsupported`.
+- **Gauges** naming the synced set SHALL be `runner.pipelines.cached`, `runner.pipelines.stopped`,
+  `runner.pipelines.paused` and `runner.pipelines.unsupported`.
 - **Per-pipeline series** SHALL carry the tag key `pipeline` — on `runner.spend.calls.today`,
   `runner.scan.lag.seconds`, `runner.class1.rows.written`, `runner.scan.rows.skipped`,
   `runner.scan.pages.refused` and `runner.backfill.batch.failures`.
@@ -266,8 +271,8 @@ MDC key, so one attribute filter selects a pipeline's records from both services
 #### Scenario: The synced-set gauges carry the pipeline spelling
 
 - **WHEN** the exposed metric set is inspected
-- **THEN** it contains `runner.pipelines.cached`, `runner.pipelines.paused` and `runner.pipelines.unsupported`,
-  and no `runner.rules.*` series
+- **THEN** it contains `runner.pipelines.cached`, `runner.pipelines.stopped`, `runner.pipelines.paused` and
+  `runner.pipelines.unsupported`, and no `runner.rules.*` series
 
 #### Scenario: A per-pipeline series is tagged by pipeline
 
@@ -314,21 +319,22 @@ again. Folding any two of them into one counter makes the pass's outcome unreada
 The runner SHALL expose the number of pipelines paused **by the circuit breaker** separately from the
 total number paused.
 
-The total cannot carry an alert. An operator's pause is a legitimate steady state, so a rule written
-against the total is either permanently lit or permanently ignored — and it was the total that existed
-while a pipeline sat auto-paused for fourteen hours with every surface reading healthy. A breaker-origin
-pause has no legitimate steady state: it is by construction a temporary inference about an upstream, so
-"one of these has persisted" is exactly the alert condition, and the separate series is what makes it
+Every pause the runner holds is now the breaker's — an operator stops a pipeline in ADAS, and the runner counts that
+in `runner.pipelines.stopped` — so the two series read the same. Both SHALL remain, because alert rules and
+dashboards are written against each, and a stopped pipeline SHALL be counted by neither: a stop is a legitimate
+steady state, so a rule written against a series that included it would be either permanently lit or permanently
+ignored. A breaker-origin pause has no legitimate steady state: it is by construction a temporary inference about an
+upstream, so "one of these has persisted" is exactly the alert condition, and the separate series is what makes it
 expressible.
 
 Both series SHALL be untagged counts. The condition is about the runner's state, not about any one
 pipeline's identity, and the listing is where a specific pipeline is named.
 
-#### Scenario: An operator pause does not light the auto-pause alarm
+#### Scenario: A stopped pipeline does not light the auto-pause alarm
 
-- **GIVEN** a pipeline an operator has paused
+- **GIVEN** a pipeline disabled in ADAS and cached as stopped
 - **WHEN** the metrics are scraped
-- **THEN** the total paused gauge counts it and the auto-paused gauge does not
+- **THEN** the stopped gauge counts it, and neither the total paused gauge nor the auto-paused gauge does
 
 #### Scenario: A resumed auto-pause clears its series
 
@@ -372,7 +378,7 @@ published as a value.
 
 When the sync resets a pipeline recreated under the same name, the runner SHALL log one WARN line naming the pipeline,
 the `created_at` it replaced and the new one, how many group rows and queued work items it deleted and how many
-backfill runs it cancelled, and whether an operator pause was kept; and SHALL count the reset in
+backfill runs it cancelled, and whether a breaker pause was lifted; and SHALL count the reset in
 `runner.pipeline.state.resets`. The counter SHALL be untagged: a reset describes the registry rather than one
 pipeline's activity, the line names the pipeline, and a per-pipeline series would be evicted with the pipeline it
 counts. The line is the runner's, not an operator action: it SHALL NOT be written through the operator-action log.
@@ -687,7 +693,7 @@ NOT export every MDC key, which would also duplicate the trace context each reco
 The runner SHALL log one status line per synced pipeline every `observability.status-report.interval`
 (`STATUS_REPORT_INTERVAL`, default `5m`). Each line SHALL carry:
 - the lane and the generation;
-- the state: active, paused with its origin, over budget, backpressured, or held;
+- the state: stopped, active, paused with its origin, over budget, backpressured, or held;
 - how long ago it last wrote, and the rows written and items dead-lettered since the previous line;
 - the lag, how long ago it last scanned, and when it next fires, including whether that fire is overdue.
 
@@ -704,7 +710,9 @@ A backfill run is orphaned when it reads running but has no `backfill-run` execu
 The runner SHALL log one WARN per orphaned run on every report, naming the run, its pipeline and the remedy (pause
 and resume), because the condition persists until an operator acts. No read endpoint SHALL log it.
 
-A pipeline's line SHALL be logged at WARN when the pipeline is paused. It SHALL also be logged at WARN when the
+A stopped pipeline's line SHALL be logged at INFO and SHALL NOT be reported as stalled: a stop is a decision taken
+in ADAS rather than a condition, and a stopped pipeline writes nothing by design. A pipeline's line SHALL be logged
+at WARN when the pipeline is paused. It SHALL also be logged at WARN when the
 pipeline has written nothing for more than its stall threshold while lag is above zero. The stall threshold is
 three times its cadence; for a group pipeline it SHALL be the longer of that and its effective `ready_when.idle`
 (the declared window, else `GROUP_DEFAULT_IDLE`) plus `GROUP_SWEEP_INTERVAL`, because a group pipeline's cadence is
@@ -743,6 +751,12 @@ Stopping is the failure a log-only operator cannot otherwise see: a pipeline tha
 - **WHEN** the status report runs
 - **THEN** its line is logged at INFO with rows written since the previous line
 
+#### Scenario: A stopped pipeline reports at INFO
+
+- **GIVEN** a pipeline cached as stopped, with lag above zero and no write for longer than its stall threshold
+- **WHEN** the status report runs
+- **THEN** its line is logged at INFO with the state `stopped`, and is not a WARN for missing writes
+
 #### Scenario: A fresh start does not cry stall
 
 - **GIVEN** a runner started less than its stall threshold ago with a lagging pipeline
@@ -760,3 +774,4 @@ count and the stages. That holds even when no row of the chunk was written.
 
 - **WHEN** every row of a chunk is dead-lettered
 - **THEN** a WARN names the pipeline, the number of rows and their stages
+

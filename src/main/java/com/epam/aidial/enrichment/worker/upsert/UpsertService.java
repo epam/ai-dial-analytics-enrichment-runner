@@ -1,11 +1,13 @@
 package com.epam.aidial.enrichment.worker.upsert;
 
+import com.epam.aidial.enrichment.adas.AdasRefusals;
 import com.epam.aidial.enrichment.adas.AdasUpsertClient;
 import com.epam.aidial.enrichment.adas.AdasWorkGate;
 import com.epam.aidial.enrichment.adas.dto.PipelineDto;
 import com.epam.aidial.enrichment.dlq.DlqCircuitBreaker;
 import com.epam.aidial.enrichment.dlq.DlqStage;
 import com.epam.aidial.enrichment.exception.ErrorMessages;
+import com.epam.aidial.enrichment.exception.PipelineStoppedHoldException;
 import com.epam.aidial.enrichment.exception.TransientChunkException;
 import com.epam.aidial.enrichment.observability.RunnerMetrics;
 import com.epam.aidial.enrichment.observability.RunnerTracer;
@@ -112,12 +114,13 @@ public class UpsertService {
         // written that is provenance-stamped with the superseded pipeline generation.
         PipelineDto pipeline = pipelineCache.get(payload.getPipelineName());
         if (pipeline == null) {
-            // Absent from the cache means disabled OR deleted: ADAS's feed omits both, so the runner cannot
-            // tell a pause from a deletion. The pre-compute lanes drop such an item and are right to — a scan
+            // Absent from the cache means deleted, no longer servable, or refused by the admission gate — a stopped
+            // pipeline stays cached and is held below. The pre-compute lanes drop such an item and are right to — a scan
             // re-runs, a chunk or a group item is re-derived, and nothing has been spent. THIS lane is the one
             // holding a result the model was already paid for, whose only copy is the payload in hand, so
             // dropping it destroys work instead of deferring it. Archived with its rows instead, so a requeue
-            // re-attempts the write once the pipeline is back and recomputes nothing.
+            // re-attempts the write once the pipeline is back and recomputes nothing — a refused pipeline can be
+            // admitted again once its declaration is fixed.
             //
             // Neither stamped nor counted against the breaker, unlike a rejection ADAS keeps refusing: the
             // write never reached ADAS, so nothing about the group's evaluation state changed, and pausing a
@@ -129,10 +132,10 @@ public class UpsertService {
             // at generation 0, because the arm below is what would adopt a live one and there is no pipeline
             // to take it from — and DlqRequeueService refuses a generation-0 payload. The rows stay readable
             // in dlq_item.payload for a hand replay or a bounded backfill; see DlqRequeueService.foldEra.
-            log.warn("Archiving upsert for pipeline {}: pipeline absent from the cache (disabled or deleted); "
+            log.warn("Archiving upsert for pipeline {}: pipeline absent from the cache (deleted or refused); "
                     + "requeue it once the pipeline is back", payload.getPipelineName());
             archive(itemId, payload,
-                    "pipeline absent from the runner's cache (disabled or deleted) when the write ran", null);
+                    "pipeline absent from the runner's cache (deleted or refused) when the write ran", null);
             return;
         }
         // Read AFTER this, never before: a pre-fold write's rows are replaced here, and a copy taken at the
@@ -147,6 +150,11 @@ public class UpsertService {
                     payload.getPipelineName(), payload.getPipelineGeneration());
             return;
         }
+        // A stopped pipeline's write is held, not archived: the result is paid for, and it lands once the pipeline is
+        // re-enabled at the same generation, which a flag-only change in ADAS does not move.
+        if (!pipeline.enabled()) {
+            throw new PipelineStoppedHoldException("write-back for pipeline " + payload.getPipelineName());
+        }
 
         int inserted;
         try {
@@ -155,6 +163,12 @@ public class UpsertService {
         } catch (RestClientResponseException e) {
             if (RetryableStatus.isRetryable(e)) {
                 throw new TransientChunkException(DlqStage.UPSERT, e);
+            }
+            if (AdasRefusals.isPipelineDisabled(e)) {
+                // The pipeline was stopped in ADAS before this runner's next sync saw it. Held: dead-lettering it would
+                // leave a paid result to a manual requeue, stamping the group would mark an unwritten label clean,
+                // and counting every row of the write against the breaker would let a stop trip it.
+                throw new PipelineStoppedHoldException("write-back for pipeline " + payload.getPipelineName());
             }
             // A rejection ADAS will keep rejecting — a column the pipeline no longer declares after a mid-flight
             // change. Dead-lettered with its payload so it is requeueable once the pipeline is fixed, and without

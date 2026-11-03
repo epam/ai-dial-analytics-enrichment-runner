@@ -13,13 +13,14 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * The pipelines whose enqueue is paused — by an operator, or by the DLQ circuit breaker — with what each
- * pause is and when it started. A paused pipeline's scan fires, readiness sweeps and materialize ticks are
- * skipped. Single active replica in phase-1, so in-memory state suffices; a restart clears every pause,
- * which the single-replica topology already assumes.
+ * The pipelines whose enqueue the DLQ circuit breaker has paused, with what each pause is and when it started.
+ * An operator does not pause here: a deliberate stop is ADAS's {@code enabled} flag, which the runner follows as
+ * the pipeline's single run control, so this registry holds only the runner's own inference. A paused pipeline's
+ * scan fires, readiness sweeps and materialize ticks are skipped. Single active replica in phase-1, so in-memory
+ * state suffices; a restart clears every pause, which the single-replica topology already assumes.
  *
- * <p><strong>A breaker pause expires; an operator pause does not.</strong> See {@link PauseOrigin} for why
- * the two cannot share a lifetime. Expiry is evaluated lazily in {@link #current}, the single read path
+ * <p><strong>A breaker pause expires</strong>, being an inference about an upstream (see {@link PauseOrigin}),
+ * unless expiry is configured off. Expiry is evaluated lazily in {@link #current}, the single read path
  * every gate goes through, rather than by a scheduled reaper: the read is the only moment the answer
  * matters, so no stale entry is ever observable and the class needs no second scheduled component.
  *
@@ -39,7 +40,7 @@ public class PipelinePauseRegistry {
     /**
      * One pipeline's pause.
      *
-     * @param origin    who paused it, which decides whether it expires
+     * @param origin    who paused it — always the breaker
      * @param reason    what was recorded at the time, so the listing answers "why" without a log search
      * @param since     when the pause began
      * @param resumesAt when it lifts itself, or {@code null} for a pause that never expires
@@ -47,7 +48,7 @@ public class PipelinePauseRegistry {
     public record Pause(PauseOrigin origin, String reason, Instant since, Instant resumesAt) {
     }
 
-    /** Pauses indefinitely: an operator's decision, or a breaker trip when expiry is disabled. */
+    /** Pauses indefinitely: a breaker trip when expiry is disabled, held until lifted through {@link #resume}. */
     public void pause(String pipelineName, PauseOrigin origin, String reason) {
         pauseUntil(pipelineName, origin, reason, null);
     }
@@ -57,20 +58,12 @@ public class PipelinePauseRegistry {
         paused.put(pipelineName, new Pause(origin, reason, clock.instant(), resumesAt));
     }
 
-    public void resume(String pipelineName) {
-        paused.remove(pipelineName);
-    }
-
     /**
-     * Lifts a breaker pause and keeps an operator one, for a pipeline recreated under the same name. The breaker's
-     * inference was drawn from the deleted pipeline's failures and says nothing about the new one; an operator's stop
-     * was a decision about the name and must survive anything the runner concludes.
-     *
-     * @return the operator pause that was kept, if there is one
+     * Lifts the pipeline's breaker pause early, answering whether there was one to lift. An elapsed pause has
+     * already lifted itself, so it is not "one to lift".
      */
-    public Optional<Pause> clearBreakerPause(String pipelineName) {
-        return Optional.ofNullable(paused.computeIfPresent(pipelineName,
-                (name, current) -> current.origin() == PauseOrigin.BREAKER ? null : current));
+    public boolean resume(String pipelineName) {
+        return current(pipelineName).isPresent() && paused.remove(pipelineName) != null;
     }
 
     /** Whether the pipeline's enqueue is paused, lifting an auto-pause whose window has elapsed. */
@@ -117,12 +110,11 @@ public class PipelinePauseRegistry {
     }
 
     /**
-     * How many of those the breaker paused. Its own series because the total cannot carry an alert: an
-     * operator pause is a legitimate steady state, so a rule written against the total is either permanently
-     * lit or permanently ignored. A breaker pause has no legitimate steady state, which is what makes
-     * "one of these has persisted" expressible.
+     * How many of those the breaker paused — every one of them, now that an operator stops a pipeline in ADAS. Kept
+     * as its own series for the alerts written against it: a breaker pause has no legitimate steady state, which is
+     * what makes "one of these has persisted" expressible.
      */
     public int autoPausedCount() {
-        return (int) paused.values().stream().filter(p -> p.origin() == PauseOrigin.BREAKER).count();
+        return pausedCount();
     }
 }

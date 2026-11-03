@@ -40,6 +40,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.absent;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
@@ -199,16 +200,30 @@ class PipelineRecreationIntegrationTest {
     }
 
     @Test
-    void operatorPauseSurvivesTheReset() {
+    void breakerPauseIsLiftedByTheReset() {
         stubFeed(pipeline(NAME, 2, FIRST));
         syncService.sync();
-        pauseRegistry.pause(NAME, PauseOrigin.OPERATOR, "investigating");
+        pauseRegistry.pause(NAME, PauseOrigin.BREAKER, "40/50 dead-lettered");
 
         stubFeed(pipeline(NAME, 2, SECOND));
         syncService.sync();
 
-        assertThat(pauseRegistry.current(NAME)).get().extracting(PipelinePauseRegistry.Pause::origin)
-                .isEqualTo(PauseOrigin.OPERATOR);
+        // Drawn from the deleted pipeline's failures, it says nothing about the new one.
+        assertThat(pauseRegistry.current(NAME)).isEmpty();
+    }
+
+    @Test
+    void recreatedPipelineThatArrivesDisabledStaysStopped() {
+        stubFeed(pipeline(NAME, 2, FIRST));
+        syncService.sync();
+
+        stubFeed(stopped(pipeline(NAME, 2, SECOND)));
+        syncService.sync();
+
+        // Reset like any recreated pipeline, and stopped because that is what its own flag says.
+        assertThat(storedCreatedAt()).isEqualTo(SECOND);
+        assertThat(storedCursor()).isNull();
+        assertThat(cache.isStopped(NAME)).isTrue();
     }
 
     @Test
@@ -425,7 +440,7 @@ class PipelineRecreationIntegrationTest {
     private void stubFeed(String pipelineObjects) {
         ADAS.stubFor(get(urlPathEqualTo("/v1/pipelines"))
                 .withQueryParam("kind", equalTo("enrich"))
-                .withQueryParam("enabled", equalTo("true"))
+                .withQueryParam("enabled", absent())
                 .withQueryParam("view", equalTo("compiled"))
                 .willReturn(okJson("{\"pipelines\":[" + pipelineObjects + "]}")));
     }
@@ -445,6 +460,11 @@ class PipelineRecreationIntegrationTest {
                   "created_at":"%s","updated_at":"%s"
                 }
                 """.formatted(name, name, generation, createdAt, createdAt);
+    }
+
+    /** The same feed entry as ADAS serves it once the pipeline is disabled. */
+    private static String stopped(String entry) {
+        return entry.replace("\"enabled\":true", "\"enabled\":false");
     }
 
     private static ChunkPayload chunk() {

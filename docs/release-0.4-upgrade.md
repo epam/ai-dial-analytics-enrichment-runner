@@ -21,6 +21,10 @@ The runner also closes the API description in `oidc` mode: it now needs a `FULL_
 Set `DISABLE_SWAGGER_AUTHORIZATION=true` before the deploy if people open the Swagger UI or fetch
 `/v3/api-docs` without a token in `oidc` mode (§2). Nothing else changes in your values.
 
+Convert operator pauses into stops (§2): list `GET /v1/pipelines/paused`, and for each entry whose `origin` is
+`operator`, set `enabled: false` on the pipeline in ADAS. The deploy restarts the runner, which clears every pause
+anyway; this keeps a pipeline stopped on purpose stopped.
+
 ### The window
 
 1. **Scale the runner to 0** and wait for the pod to be gone. A rolling update is not enough: an old and a
@@ -60,12 +64,30 @@ closed; the OpenAPI JSON stays reachable by an API client sending a `FULL_ADMIN`
 protected: set it where the UI is needed and the runner is not broadly reachable. In `none` mode the API
 description stays open.
 
+**A pipeline has one run control: ADAS's `enabled` flag.** `POST /v1/pipelines/{name}/pause` is removed (`404`).
+`POST /v1/pipelines/{name}/resume` stays but only lifts a DLQ circuit-breaker pause, and answers
+`409 pipeline_not_paused` for a pipeline the breaker has not paused. `GET /v1/pipelines/{name}/runtime` answers
+`200` with `status.state: stopped` for a disabled pipeline, where it answered `404`. A backfill on a stopped
+pipeline pauses as `pipeline_stopped`, and starting or resuming one is a `409`; `pipeline_absent` now means deleted
+or refused only. Scripts and UIs that paused a pipeline here switch to `PATCH /v1/pipelines/{name}` with `enabled`
+on ADAS.
+
 ADAS-side changes to pipeline registration (a group-trigger pipeline, or one reading another table, cannot
 target an aligned enrichment) are in ADAS's guide.
 
 ---
 
 ## 3. Behaviour changes
+
+### A stopped pipeline keeps its work
+
+The runner reads ADAS's feed unfiltered and caches a disabled pipeline as **stopped** instead of dropping it. Its
+recurring fire is cancelled, and its queued chunks, group items and writes are held until it is re-enabled, where
+they used to be dropped (chunks, whose rows were then never re-read) or archived to the DLQ (writes). A write ADAS
+refuses with `409 pipeline_conflict` because the stop reached ADAS first is held the same way, and no longer counts
+against the circuit breaker. This relies on ADAS 0.4 leaving `generation` alone on a patch that only changes
+`enabled`; against an older ADAS, held work is dropped as stale on restart, as before. New gauge:
+`runner.pipelines.stopped`; `runner.pipelines.cached` now includes stopped pipelines.
 
 ### The write-back echoes `__partition_v`
 
@@ -123,7 +145,8 @@ a mismatched pair never renders a template or calls a model on the new feed.
 
 ### Migrations
 
-None.
+`V14` adds `pipeline_stopped` to the `run_history.paused_reason` check. Additive: the previous build never writes
+the new value.
 
 ### Configuration
 

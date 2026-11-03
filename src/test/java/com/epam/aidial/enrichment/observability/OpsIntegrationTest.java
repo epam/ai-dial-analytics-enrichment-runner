@@ -1,6 +1,8 @@
 package com.epam.aidial.enrichment.observability;
 
 import com.epam.aidial.enrichment.integration.PostgresContainerSupport;
+import com.epam.aidial.enrichment.pause.PauseOrigin;
+import com.epam.aidial.enrichment.pause.PipelinePauseRegistry;
 import com.epam.aidial.enrichment.support.TestPipelines;
 import com.epam.aidial.enrichment.sync.PipelineCache;
 import org.junit.jupiter.api.Test;
@@ -16,6 +18,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -36,6 +39,9 @@ class OpsIntegrationTest {
 
     @Autowired
     private ReadinessState readinessState;
+
+    @Autowired
+    private PipelinePauseRegistry pauseRegistry;
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
@@ -59,10 +65,40 @@ class OpsIntegrationTest {
     }
 
     @Test
+    void pipelineCacheEndpointListsStoppedPipelineAsDisabled() throws Exception {
+        pipelineCache.replaceAll(Map.of("r1",
+                TestPipelines.stopped(TestPipelines.schedule("r1", 7, TestPipelines.EVERY_30_SECONDS))));
+
+        mockMvc.perform(get("/v1/pipelines/cache"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[0].name").value("r1"))
+                .andExpect(jsonPath("$.pipelines[0].enabled").value(false));
+    }
+
+    /** There is no pause here: a pipeline is stopped in ADAS, and resume lifts a breaker pause and nothing else. */
+    @Test
+    void pauseIsGoneAndResumeOfUnpausedPipelineIsConflict() throws Exception {
+        mockMvc.perform(post("/v1/pipelines/r1/pause")).andExpect(status().isNotFound());
+        mockMvc.perform(post("/v1/pipelines/r1/resume"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("pipeline_not_paused"));
+    }
+
+    @Test
+    void resumeLiftsBreakerPause() throws Exception {
+        pauseRegistry.pause("r2", PauseOrigin.BREAKER, "40/50 dead-lettered");
+
+        mockMvc.perform(post("/v1/pipelines/r2/resume")).andExpect(status().isNoContent());
+
+        assertThat(pauseRegistry.isPaused("r2")).isFalse();
+    }
+
+    @Test
     void prometheusExposesRunnerMetrics() throws Exception {
         mockMvc.perform(get("/actuator/prometheus"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(containsString("runner_pipelines_cached")))
+                .andExpect(content().string(containsString("runner_pipelines_stopped")))
                 // The auto-pause gauge: a breaker trip is otherwise only a log line, while the condition it
                 // announces lasts until an operator resumes the pipeline.
                 .andExpect(content().string(containsString("runner_pipelines_paused")));

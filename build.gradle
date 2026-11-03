@@ -38,8 +38,9 @@ repositories {
 dependencies {
     implementation platform(org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES)
     // Overrides the Boot-BOM-managed OpenTelemetry — unbounded memory allocation in W3C baggage
-    // propagation, patched in 1.62.0 (aligned with ADAS).
-    implementation platform('io.opentelemetry:opentelemetry-bom:1.62.0')
+    // propagation, patched in 1.62.0; quadratic CPU in W3C tracestate parsing (CVE-2026-118259),
+    // patched in 1.67.0.
+    implementation platform('io.opentelemetry:opentelemetry-bom:1.67.0')
 
     implementation 'org.springframework.boot:spring-boot-starter-webmvc'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
@@ -74,15 +75,15 @@ dependencies {
     // overridden (telemetry.sdk.* is on its reserved list). This shim bridges the Micrometer
     // MeterRegistry API onto the OTel SDK's meter provider instead. See
     // OpenTelemetryMetricsConfiguration. Version matches the log4j appender's instrumentation line.
-    implementation 'io.opentelemetry.instrumentation:opentelemetry-micrometer-1.5:2.28.1-alpha'
+    implementation 'io.opentelemetry.instrumentation:opentelemetry-micrometer-1.5:2.33.1-alpha'
     // Used directly by OpenTelemetryMetricsConfiguration to build the SdkMeterProvider and its OTLP
     // metric exporter. Both arrive transitively via the starter, but only on the runtime classpath —
     // declared explicitly because main code compiles against them. BOM-managed (opentelemetry-bom).
     implementation 'io.opentelemetry:opentelemetry-sdk'
     implementation 'io.opentelemetry:opentelemetry-exporter-otlp'
     // Routes log4j2 events into the OTel SDK; the official starter does not auto-install the
-    // appender. Version aligned with the OTel API 1.62.0 pinned via opentelemetry-bom above.
-    implementation 'io.opentelemetry.instrumentation:opentelemetry-log4j-appender-2.17:2.28.1-alpha'
+    // appender. Version aligned with the OTel API 1.67.0 pinned via opentelemetry-bom above.
+    implementation 'io.opentelemetry.instrumentation:opentelemetry-log4j-appender-2.17:2.33.1-alpha'
 
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.3'
 

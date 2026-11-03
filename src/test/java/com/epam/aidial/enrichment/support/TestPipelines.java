@@ -50,6 +50,18 @@ public final class TestPipelines {
         return builder(name).rowsPerCall(rowsPerCall).transformInputs(inputs).build();
     }
 
+    /** The same pipeline as the feed serves it once disabled in ADAS: same declaration, same generation, stopped. */
+    public static PipelineDto stopped(PipelineDto pipeline) {
+        return withEnabled(pipeline, false);
+    }
+
+    /** The same pipeline with its run control set to {@code enabled}, keeping every other member. */
+    public static PipelineDto withEnabled(PipelineDto pipeline, boolean enabled) {
+        return new PipelineDto(pipeline.name(), pipeline.transform(), pipeline.responseSchema(), pipeline.grainKey(),
+                pipeline.versionColumn(), pipeline.trigger(), pipeline.outputs(), pipeline.advanced(), enabled,
+                pipeline.generation(), pipeline.createdAt());
+    }
+
     /** One variable bound straight to a source column — the shape almost every fixture wants. */
     public static Map<String, VarDto> columnVar(String name, String column) {
         return Map.of(name, new VarDto(column, null));

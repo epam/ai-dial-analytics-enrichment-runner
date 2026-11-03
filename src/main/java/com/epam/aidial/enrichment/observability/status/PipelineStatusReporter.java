@@ -186,6 +186,7 @@ public class PipelineStatusReporter {
     private static String words(PipelineStatusResolver.State state) {
         return switch (state) {
             case ACTIVE -> "active";
+            case STOPPED -> "stopped";
             case HELD -> "held";
             case OVER_BUDGET -> "over budget";
             case BACKPRESSURED -> "backpressured";

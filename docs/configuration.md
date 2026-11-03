@@ -202,7 +202,7 @@ whole; a group fetch needs the extra room. Raise the two together.
 | `ADAS_API_KEY`                    | `adas.api-key`                    | _(empty)_               | Yes      | DIAL `Api-Key` presented to ADAS. Supply from the deployment's secret store.                                                                    |
 | `ADAS_CONNECT_TIMEOUT_MS`         | `adas.connect-timeout-ms`         | `5000`                  | No       | HTTP connect timeout for ADAS calls.                                                                                                            |
 | `ADAS_READ_TIMEOUT_MS`            | `adas.read-timeout-ms`            | `180000`                | No       | HTTP read timeout for ADAS calls. Must stay above ADAS's `PIPELINE_BUDGET_TIMEOUT`; equal values let a refusal race a socket timeout.           |
-| `ADAS_PIPELINES_POLL_INTERVAL_MS` | `adas.pipelines.poll-interval-ms` | `30000`                 | No       | How often the runner polls `GET /v1/pipelines?kind=enrich&enabled=true` to refresh the pipeline cache and reconcile recurring tasks.            |
+| `ADAS_PIPELINES_POLL_INTERVAL_MS` | `adas.pipelines.poll-interval-ms` | `30000`                 | No       | How often the runner polls `GET /v1/pipelines?kind=enrich&view=compiled` to refresh the pipeline cache and reconcile recurring tasks.            |
 | `ADAS_PIPELINES_INITIAL_DELAY_MS` | `adas.pipelines.initial-delay-ms` | `10000`                 | No       | Delay before the first sync. Readiness reports DOWN until that sync succeeds, so size a startup probe for this plus at least one poll interval. |
 
 ### DIAL Core
@@ -302,6 +302,7 @@ Items that exhaust their retries are archived to `dlq_item` with their raw respo
 on dead-letter rate auto-pauses a pipeline's enqueue for `DLQ_BREAKER_PAUSE_FOR`, doubling on each consecutive
 trip up to `DLQ_BREAKER_PAUSE_MAX`; the pause then lifts itself, unless `DLQ_BREAKER_PAUSE_FOR` is `0`, which
 disables expiry. An operator can lift it earlier with `POST /v1/pipelines/{name}/resume`. Pauses are held in memory, so a restart lifts every pause.
+A deliberate stop is not a pause: it is ADAS's `enabled` flag, which the runner follows.
 
 | Variable                    | Property                    | Default       | Required | Description                                                                                                                                                                                                   |
 |-----------------------------|-----------------------------|---------------|----------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

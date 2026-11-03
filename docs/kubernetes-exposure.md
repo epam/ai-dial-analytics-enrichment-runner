@@ -124,11 +124,11 @@ a bare path cannot tell which service owns it. The split, on the same noun:
 | Verb | Host | What it does |
 |---|---|---|
 | `POST /v1/pipelines`, `PATCH`/`DELETE /v1/pipelines/{name}` | ADAS (`adas.example.com`) | Registers and edits a pipeline of either kind. The registry lives there; the runner is a read-only consumer of it. |
-| `GET /v1/pipelines?kind=enrich&enabled=true` | ADAS | The runner's own sync feed. Not something an operator routes. |
+| `GET /v1/pipelines?kind=enrich&view=compiled` | ADAS | The runner's own sync feed. Not something an operator routes. |
 | `POST /v1/pipelines/{name}/preview`, `/refresh` | ADAS | Dry-runs and drives an `aggregate` pipeline. |
 | `POST /v1/pipelines/{name}/scan`, `/group-rows`, `/materialize`, `/rows` | ADAS | The enrichment data plane the runner calls. Not something an operator routes either. |
 | `GET /v1/pipelines/cache`, `/paused` | **this runner** | What this runner has synced, and what it has paused. |
-| `POST /v1/pipelines/{name}/pause`, `/resume`, `/backfill` | **this runner** | Operator control of this runner's execution. |
+| `POST /v1/pipelines/{name}/resume`, `/backfill` | **this runner** | Operator control of this runner's execution: lifting a breaker pause early, and backfill. A pipeline is stopped and started in ADAS (`PATCH /v1/pipelines/{name}` `enabled`). |
 | `GET /v1/pipelines/{name}/groups`, `POST …/groups/{key}/requeue` | **this runner** | Group state this runner owns. |
 | `GET /v1/pipelines/{name}/runtime` | **this runner** | What one pipeline is doing right now: status, schedule, progress, queue, groups, spend and dead-letter counts. Not ADAS's `GET /v1/pipelines/{name}`, whose `state` carries ADAS's own positions. |
 
@@ -153,7 +153,7 @@ spec:
     - host: runner.example.com
       http:
         paths:
-          - path: /v1/pipelines        # pipeline cache + pause/resume + group state + runtime view + backfill trigger
+          - path: /v1/pipelines        # pipeline cache + breaker resume + group state + runtime view + backfill trigger
             pathType: Prefix
             backend: { service: { name: dial-analytics-enrichment-runner, port: { number: 80 } } }
           - path: /v1/backfills        # backfill run listing + status + pause/resume/cancel

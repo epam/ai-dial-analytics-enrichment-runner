@@ -13,6 +13,7 @@ import com.epam.aidial.enrichment.dlq.DlqCircuitBreaker;
 import com.epam.aidial.enrichment.dlq.DlqStage;
 import com.epam.aidial.enrichment.exception.AdasIncompatibleHoldException;
 import com.epam.aidial.enrichment.exception.OutputMappingException;
+import com.epam.aidial.enrichment.exception.PipelineStoppedHoldException;
 import com.epam.aidial.enrichment.exception.TransientChunkException;
 import com.epam.aidial.enrichment.exception.UnresolvedPlaceholderException;
 import com.epam.aidial.enrichment.observability.RunnerMetrics;
@@ -223,6 +224,33 @@ class WorkerServiceTest {
                 DlqStage.OUTPUT_MAP.dbValue(), DlqStage.OUTPUT_MAP.dbValue());
         assertThat(items).extracting(DlqItemEntity::getRunId)
                 .containsExactly("run-7", "run-7", "run-7", "run-7", null);
+    }
+
+    /**
+     * A stopped pipeline's chunk is held, never dropped: the scan cursor advanced when the chunk was enqueued, so
+     * a dropped chunk is a set of rows nothing revisits. No model call is made while it is held.
+     */
+    @Test
+    void stoppedPipelinesChunkIsHeldWithoutCallingDial() {
+        when(pipelineCache.get(PIPELINE_NAME)).thenReturn(TestPipelines.stopped(
+                TestPipelines.builder(PIPELINE_NAME).generation(GENERATION).build()));
+
+        assertThatThrownBy(() -> worker.process("c0", oneRowChunk())).isInstanceOf(PipelineStoppedHoldException.class);
+
+        verify(dialClient, never()).chatCompletion(anyString(), anyString());
+        verify(dlqItemWriter, never()).upsert(any());
+    }
+
+    /** A re-declaration while stopped moves the generation, and the stale guard still wins over the hold. */
+    @Test
+    void staleChunkOfStoppedPipelineIsDroppedRatherThanHeld() {
+        when(pipelineCache.get(PIPELINE_NAME)).thenReturn(TestPipelines.stopped(
+                TestPipelines.builder(PIPELINE_NAME).generation(GENERATION + 1).build()));
+
+        worker.process("c0", oneRowChunk());
+
+        verify(dialClient, never()).chatCompletion(anyString(), anyString());
+        verify(dlqItemWriter, never()).upsert(any());
     }
 
     /** The guard is about generation 0 only: a genuinely stale chunk keeps its ordinary silent drop. */

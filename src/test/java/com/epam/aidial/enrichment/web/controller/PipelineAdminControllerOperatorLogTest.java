@@ -1,6 +1,6 @@
 package com.epam.aidial.enrichment.web.controller;
 
-import com.epam.aidial.enrichment.pause.PauseOrigin;
+import com.epam.aidial.enrichment.exception.PipelineNotPausedException;
 import com.epam.aidial.enrichment.pause.PipelinePauseRegistry;
 import com.epam.aidial.enrichment.support.CapturingAppender;
 import com.epam.aidial.enrichment.sync.PipelineCache;
@@ -17,12 +17,11 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
-/** An operator pause and a breaker pause call for opposite responses, so the operator's line names who took it. */
+/** Lifting a breaker pause early is an operator decision over a machine one, so its line names who took it. */
 class PipelineAdminControllerOperatorLogTest {
 
     private final PipelinePauseRegistry pauseRegistry = mock(PipelinePauseRegistry.class);
@@ -42,29 +41,34 @@ class PipelineAdminControllerOperatorLogTest {
     }
 
     @Test
-    void pauseNamesTheAuthenticatedPrincipal() {
+    void earlyResumeNamesTheAuthenticatedPrincipal() {
         SecurityContextHolder.getContext().setAuthentication(
                 new TestingAuthenticationToken("alice@example.com", "n/a", "ROLE_FULL_ADMIN"));
+        when(pauseRegistry.resume("r1")).thenReturn(true);
 
-        controller.pause("r1");
         controller.resume("r1");
 
-        verify(pauseRegistry).pause(eq("r1"), eq(PauseOrigin.OPERATOR), anyString());
         assertThat(actionLines()).containsExactly(
-                "operator action: action=pipeline_pause pipeline=r1 principal=alice@example.com",
                 "operator action: action=pipeline_resume pipeline=r1 principal=alice@example.com");
     }
 
     @Test
     void withoutPrincipalTheFieldIsDash() {
-        controller.pause("r1");
         SecurityContextHolder.getContext().setAuthentication(new AnonymousAuthenticationToken("key", "anonymousUser",
                 AuthorityUtils.createAuthorityList("ROLE_ANONYMOUS")));
+        when(pauseRegistry.resume("r1")).thenReturn(true);
+
         controller.resume("r1");
 
-        assertThat(actionLines()).containsExactly(
-                "operator action: action=pipeline_pause pipeline=r1 principal=-",
-                "operator action: action=pipeline_resume pipeline=r1 principal=-");
+        assertThat(actionLines()).containsExactly("operator action: action=pipeline_resume pipeline=r1 principal=-");
+    }
+
+    @Test
+    void resumeOfPipelineTheBreakerHasNotPausedIsRefusedAndNotLogged() {
+        when(pauseRegistry.resume("r1")).thenReturn(false);
+
+        assertThatThrownBy(() -> controller.resume("r1")).isInstanceOf(PipelineNotPausedException.class);
+        assertThat(actionLines()).isEmpty();
     }
 
     private List<String> actionLines() {

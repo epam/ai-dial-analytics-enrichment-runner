@@ -43,15 +43,17 @@ import java.util.List;
 import java.util.Map;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.absent;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
+import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * M2 exit-criteria test: enabled pipelines synced from ADAS become recurring {@code pipeline-scan}
- * instances, and a pipeline that disappears from the feed (disabled/deleted) has its instance cancelled.
+ * instances, and a pipeline that is stopped or disappears from the feed has its instance cancelled.
  * ADAS is stubbed with WireMock; the runner's own PostgreSQL runs in Testcontainers. Also verifies
  * the case-insensitive enum binding of ADAS's lowercase wire values.
  */
@@ -158,30 +160,58 @@ class PipelineSyncIntegrationTest {
     }
 
     /**
-     * The {@code enabled=true} the poll sends is the first guard, not the only one: ADAS's unfiltered
-     * listing carries disabled pipelines, so a fetch that ever loses the filter (a hand-run call, a future
-     * incremental path) must still not schedule one. Belt-and-braces on purpose — a recurring task
-     * firing against a pipeline the operator switched off is exactly the failure this pair prevents.
+     * ADAS's {@code enabled} flag is the pipeline's single run control, and the poll reads the unfiltered feed so a
+     * stopped pipeline is told apart from a deleted one: it is cached, marked stopped, and has nothing scheduled — a
+     * recurring task firing against a pipeline the operator switched off is exactly the failure this prevents. The
+     * flag is compared on its own, because ADAS does not move {@code generation} on a flag-only patch.
      */
     @Test
-    void disabledPipelineInTheFeedIsNeitherCachedNorScheduled() {
-        stubPipelines(row("live", 1)
-                + "," + row("switched-off", 1).replace(
-                        "\"enabled\":true", "\"enabled\":false"));
+    void disabledPipelineInTheFeedIsCachedAsStoppedAndNotScheduled() {
+        stubPipelines(row("live", 1) + "," + stoppedRow("switched-off", 1));
 
         syncService.sync();
 
-        assertThat(cache.size()).isEqualTo(1);
-        assertThat(cache.get("live")).isNotNull();
-        assertThat(cache.get("switched-off")).isNull();
+        assertThat(cache.size()).isEqualTo(2);
+        assertThat(cache.isStopped("live")).isFalse();
+        assertThat(cache.isStopped("switched-off")).isTrue();
+        assertThat(cache.stoppedCount()).isEqualTo(1);
         assertThat(scanTaskCount()).isEqualTo(1);
     }
 
+    @Test
+    void stopAndRestartAtTheSameGenerationCancelsAndRecreatesTheTask() {
+        stubPipelines(row("toggled", 3));
+        syncService.sync();
+        assertThat(scanTaskCount()).isEqualTo(1);
+
+        stubPipelines(stoppedRow("toggled", 3));
+        syncService.sync();
+        assertThat(cache.isStopped("toggled")).isTrue();
+        assertThat(cache.get("toggled").generation()).isEqualTo(3);
+        assertThat(scanTaskCount()).isZero();
+
+        stubPipelines(row("toggled", 3));
+        syncService.sync();
+        assertThat(cache.isStopped("toggled")).isFalse();
+        assertThat(scanTaskCount()).isEqualTo(1);
+    }
+
+    @Test
+    void feedRequestCarriesNoEnabledFilter() {
+        stubPipelines(row("any", 1));
+
+        syncService.sync();
+
+        ADAS.verify(getRequestedFor(urlPathEqualTo("/v1/pipelines"))
+                .withQueryParam("kind", equalTo("enrich"))
+                .withQueryParam("view", equalTo("compiled"))
+                .withQueryParam("enabled", absent()));
+    }
+
     /**
-     * Regression for the "disable the only enabled pipeline" bug: under {@code enabled=true} a disabled
-     * pipeline leaves the feed, so disabling the last one yields an empty one. Full-list polling means empty
-     * == zero enabled pipelines, which must reconcile to empty (cache cleared, task cancelled) rather than
-     * be skipped.
+     * Regression for the "delete the only pipeline" case: deleting the last one yields an empty feed. Full-list
+     * polling means empty == zero pipelines, which must reconcile to empty (cache cleared, task cancelled) rather
+     * than be skipped.
      *
      * <p>It now takes a <em>confirming</em> poll. An empty feed stays authoritative — this test is what
      * says so — but the one-poll path from an unexpected empty answer to "every task cancelled, cache
@@ -222,7 +252,7 @@ class PipelineSyncIntegrationTest {
 
         ADAS.stubFor(get(urlPathEqualTo("/v1/pipelines"))
                 .withQueryParam("kind", equalTo("enrich"))
-                .withQueryParam("enabled", equalTo("true"))
+                .withQueryParam("enabled", absent())
                 .withQueryParam("view", equalTo("compiled"))
                 .willReturn(okJson("[" + row("kept", 1) + "]")));
 
@@ -230,6 +260,42 @@ class PipelineSyncIntegrationTest {
 
         assertThat(cache.size()).isEqualTo(1);
         assertThat(cache.get("kept")).isNotNull();
+        assertThat(scanTaskCount()).isEqualTo(1);
+    }
+
+    /**
+     * The feed is unfiltered, so it carries pipelines nobody is running. One of those whose entry does not parse — an
+     * enum value this build does not model — is skipped and reads as absent, as it did while the feed was filtered to
+     * {@code enabled=true}, instead of failing sync for every pipeline.
+     */
+    @Test
+    void unparseableDisabledEntryIsSkippedAndTheRestOfTheFeedIsAdmitted() {
+        String unparseable = stoppedRow("r-future", 1).replace("\"kind\":\"schedule\"", "\"kind\":\"streaming\"");
+        assertThat(unparseable).contains("streaming");
+        stubPipelines(row("r1", 1) + "," + unparseable);
+
+        syncService.sync();
+
+        assertThat(cache.get("r1")).isNotNull();
+        assertThat(cache.get("r-future")).isNull();
+        assertThat(scanTaskCount()).isEqualTo(1);
+    }
+
+    /**
+     * An enabled entry that does not parse still fails the poll: skipping it would read a running pipeline as deleted,
+     * cancelling its task and dropping its queued work, where a failed poll keeps everything as it was.
+     */
+    @Test
+    void unparseableEnabledEntryFailsThePollAndKeepsTheCache() {
+        stubPipelines(row("kept", 1));
+        syncService.sync();
+        assertThat(cache.size()).isEqualTo(1);
+
+        stubPipelines(row("kept", 1) + "," + row("r-future", 1).replace("\"kind\":\"schedule\"", "\"kind\":\"streaming\""));
+        syncService.sync();
+
+        assertThat(cache.size()).isEqualTo(1);
+        assertThat(cache.get("r-future")).isNull();
         assertThat(scanTaskCount()).isEqualTo(1);
     }
 
@@ -316,6 +382,18 @@ class PipelineSyncIntegrationTest {
         assertThat(cache.get("r-group")).isNull();
         assertThat(instanceIds(PipelineScanTask.TASK_NAME)).containsExactly("r1");
         assertThat(instanceIds(Class1MaterializeTask.TASK_NAME)).isEmpty();
+    }
+
+    /** A stopped pipeline goes through the same gate: one the runner could not run is absent, not merely stopped. */
+    @Test
+    void unexecutableStoppedPipelineIsNotCachedEither() {
+        stubPipelines(row("r1", 1) + "," + pipeline("r-group", 1, "group", null)
+                .replace("\"enabled\":true", "\"enabled\":false"));
+
+        syncService.sync();
+
+        assertThat(cache.get("r-group")).isNull();
+        assertThat(cache.stoppedCount()).isZero();
     }
 
     @Test
@@ -885,20 +963,25 @@ class PipelineSyncIntegrationTest {
         return meterRegistry.get("runner.pipelines.unsupported").gauge().value();
     }
 
+    /** A feed entry as ADAS serves it once the pipeline is disabled. */
+    private static String stoppedRow(String name, long generation) {
+        return row(name, generation).replace("\"enabled\":true", "\"enabled\":false");
+    }
+
     /**
-     * Stubs the registry feed, and requires all three parameters on it. Unfiltered, ADAS's
-     * {@code GET /v1/pipelines} is the operator listing of the whole registry — every kind, disabled ones
-     * included — and its default projection is the authored declaration, which carries no resolved schema, no
-     * grain key and no outputs. Matching on all three means dropping any one of them fails every sync test
-     * here with an unmatched request, rather than silently pulling pipelines the runner must not schedule,
-     * cannot model, or would refuse as unrunnable. There is deliberately no {@code contract} parameter to
+     * Stubs the registry feed, and requires the parameters the poll sends: {@code kind=enrich} and
+     * {@code view=compiled}, and no {@code enabled} filter. Without {@code kind}, ADAS's {@code GET /v1/pipelines}
+     * lists every kind; its default projection is the authored declaration, which carries no resolved schema, no
+     * grain key and no outputs; and an {@code enabled=true} filter would hide stopped pipelines the runner must
+     * keep. Matching on all three means getting any one wrong fails every sync test here with an unmatched
+     * request. There is deliberately no {@code contract} parameter to
      * match: the version travels as the {@code Adas-Contract-Version} header on every call. The body is the
      * {@code {"pipelines":[…]}} envelope, not a bare array.
      */
     private void stubPipelines(String pipelineObjects) {
         ADAS.stubFor(get(urlPathEqualTo("/v1/pipelines"))
                 .withQueryParam("kind", equalTo("enrich"))
-                .withQueryParam("enabled", equalTo("true"))
+                .withQueryParam("enabled", absent())
                 .withQueryParam("view", equalTo("compiled"))
                 .willReturn(okJson("{\"pipelines\":[" + pipelineObjects + "]}")));
     }

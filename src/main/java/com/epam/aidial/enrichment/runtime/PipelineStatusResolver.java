@@ -20,15 +20,16 @@ import java.time.Instant;
  * The one answer to "what state is this pipeline in?", shared by the status heartbeat and the runtime view so the
  * two can never disagree about one pipeline at one instant.
  *
- * <p>Precedence: paused, then held (ADAS on the other side of a contract bump), then over its daily spend budget,
- * then backpressured, then active. A paused pipeline reads no gate at all, as the heartbeat always did. A Class-1
+ * <p>Precedence: stopped (disabled in ADAS, the pipeline's single run control), then paused by the DLQ circuit
+ * breaker, then held (ADAS on the other side of a contract bump), then over its daily spend budget, then
+ * backpressured, then active. A stopped or paused pipeline reads no gate at all, as the heartbeat always did. A Class-1
  * pipeline is never over budget ({@link SpendPauseGate#isOverBudget(PipelineDto)} excludes it) and never
  * backpressured, because it queues no work items for the gate to count.
  *
  * <p><b>Stalled</b> is orthogonal to the state: lag above zero and nothing written for more than {@code stallAfter} —
  * {@value #STALL_CADENCES} cadences, or for a group pipeline at least its effective idle window plus the sweep interval,
  * because a group writes nothing until it has been quiet that long. Write activity is held in process memory, so the
- * condition is never reported within {@code stallAfter} of startup, and never while paused.
+ * condition is never reported within {@code stallAfter} of startup, and never while stopped or paused.
  *
  * <p>The gates log their own transitions, so whichever caller observes a change first logs it — still one line per
  * change.
@@ -62,7 +63,7 @@ public class PipelineStatusResolver {
 
     /** A pipeline's runtime state. Written lowercase on the wire. */
     public enum State {
-        ACTIVE, PAUSED, HELD, OVER_BUDGET, BACKPRESSURED
+        ACTIVE, STOPPED, PAUSED, HELD, OVER_BUDGET, BACKPRESSURED
     }
 
     /**
@@ -85,6 +86,11 @@ public class PipelineStatusResolver {
      * @param lagSeconds its last recorded lag, or null when unknown
      */
     public Status resolve(PipelineDto pipeline, Instant lastWrite, Long lagSeconds, Instant now) {
+        // A stop is a decision, not a condition: nothing runs, so nothing can be stalled, and a breaker pause it
+        // happens to overlap is the less useful answer to "why is nothing happening".
+        if (!pipeline.enabled()) {
+            return new Status(State.STOPPED, false, null, null);
+        }
         Pause pause = pauseRegistry.current(pipeline.name()).orElse(null);
         if (pause != null) {
             return new Status(State.PAUSED, false, null, pause);

@@ -108,7 +108,9 @@ public class GroupReadinessSweep {
         int suppressed = 0;
         int deferred = 0;
         for (PipelineDto pipeline : pipelineCache.getAll()) {
-            if (!PipelineRouting.isGroup(pipeline)) {
+            // A stopped pipeline is swept by nothing: its dirty groups stay dirty in group_state until it is
+            // re-enabled. The sync logs the stop, so the skip itself says nothing.
+            if (!PipelineRouting.isGroup(pipeline) || !pipeline.enabled()) {
                 continue;
             }
             try {

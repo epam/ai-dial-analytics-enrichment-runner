@@ -9,6 +9,7 @@ import com.epam.aidial.enrichment.configuration.GroupProperties;
 import com.epam.aidial.enrichment.dlq.DlqCircuitBreaker;
 import com.epam.aidial.enrichment.dlq.DlqStage;
 import com.epam.aidial.enrichment.exception.OutputMappingException;
+import com.epam.aidial.enrichment.exception.PipelineStoppedHoldException;
 import com.epam.aidial.enrichment.exception.ResponseValidationException;
 import com.epam.aidial.enrichment.exception.TransientChunkException;
 import com.epam.aidial.enrichment.exception.UnresolvedPlaceholderException;
@@ -141,6 +142,11 @@ public class GroupWorkerService {
                     payload.getPipelineName(), payload.getPipelineGeneration());
             return;
         }
+        // Held rather than dropped, so a stopped pipeline's queued groups are evaluated once it is re-enabled instead
+        // of waiting for a sweep to find them dirty again.
+        if (!pipeline.enabled()) {
+            throw new PipelineStoppedHoldException("group item " + itemId);
+        }
 
         GroupFetchResponse fetched;
         try {
@@ -236,7 +242,8 @@ public class GroupWorkerService {
             return;
         }
 
-        // Re-check before persisting: a disable or re-pin mid-flight drops the group without writing.
+        // Re-check before persisting: a deletion or re-pin mid-flight drops the group without writing. A stop does not:
+        // the model call is paid for, so the write item is enqueued and the write lane holds it.
         PipelineDto current = pipelineCache.get(payload.getPipelineName());
         if (current == null || isStale(current, payload)) {
             log.info("Dropping group item for pipeline {}: pipeline changed mid-flight", payload.getPipelineName());

@@ -5,6 +5,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -145,8 +146,20 @@ public final class ErrorMessages {
             return "HTTP " + rejection.getStatusCode().value();
         }
         String text = "ADAS " + rejection.getStatusCode().value();
+        return adasErrorCode(rejection).map(code -> text + " " + code).orElse(text);
+    }
+
+    /**
+     * ADAS's stable machine code from a rejection it produced — one carrying the contract echo — or empty for any
+     * other response, whose body is not read.
+     */
+    public static Optional<String> adasErrorCode(RestClientResponseException rejection) {
+        HttpHeaders headers = rejection.getResponseHeaders();
+        if (headers == null || headers.getFirst(AdasContract.HEADER) == null) {
+            return Optional.empty();
+        }
         Matcher code = ADAS_ERROR_CODE.matcher(rejection.getResponseBodyAsString());
-        return code.find() ? text + " " + code.group(1) : text;
+        return code.find() ? Optional.of(code.group(1)) : Optional.empty();
     }
 
     private static int indexOfLineBreak(String value) {

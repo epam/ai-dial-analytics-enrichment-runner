@@ -1,5 +1,6 @@
 package com.epam.aidial.enrichment.class1;
 
+import com.epam.aidial.enrichment.adas.AdasContract;
 import com.epam.aidial.enrichment.adas.AdasMaterializeClient;
 import com.epam.aidial.enrichment.adas.dto.MaterializeResponse;
 import com.epam.aidial.enrichment.adas.dto.PipelineDto;
@@ -23,10 +24,13 @@ import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.net.SocketTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Optional;
@@ -217,6 +221,33 @@ class Class1MaterializeExecutorTest {
 
         verify(runnerMetrics).incrementClass1TickFailures();
         verify(cursorRepository, never()).save(any());
+    }
+
+    /** ADAS refusing the window as disabled is a stop the sync has not seen yet, not a failed tick. */
+    @Test
+    void windowRefusedAsDisabledEndsTheFireWithoutFailure() {
+        cachePipeline();
+        when(cursorRepository.findById(PIPELINE_NAME)).thenReturn(Optional.of(cursorAtC1()));
+        HttpHeaders headers = new HttpHeaders();
+        headers.add(AdasContract.HEADER, AdasContract.VERSION_VALUE);
+        when(materializeClient.materialize(eq(PIPELINE_NAME), any(), anyInt())).thenThrow(new RestClientResponseException(
+                "409 pipeline_conflict", 409, "Conflict", headers,
+                "{\"error\":\"pipeline_conflict\"}".getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8));
+
+        executor.execute(PIPELINE_NAME);
+
+        verify(runnerMetrics, never()).incrementClass1TickFailures();
+        verify(cursorRepository, never()).save(any());
+    }
+
+    @Test
+    void stoppedPipelineIsNotMaterialized() {
+        when(pipelineCache.get(PIPELINE_NAME)).thenReturn(
+                TestPipelines.stopped(TestPipelines.class1(PIPELINE_NAME, 1, TestPipelines.EVERY_5_MINUTES)));
+
+        executor.execute(PIPELINE_NAME);
+
+        verify(materializeClient, never()).materialize(any(), any(), anyInt());
     }
 
     @Test
