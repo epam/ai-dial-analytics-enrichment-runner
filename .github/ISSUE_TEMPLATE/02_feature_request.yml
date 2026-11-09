@@ -12,7 +12,7 @@ body:
     attributes:
       label: Name and Version
       description: Application name and version
-      placeholder: ai-dial-analytics-enrichment-runner 0.4.0
+      placeholder: ai-dial-analytics-enrichment-runner 0.23.0
     validations:
       required: true
   - type: textarea
