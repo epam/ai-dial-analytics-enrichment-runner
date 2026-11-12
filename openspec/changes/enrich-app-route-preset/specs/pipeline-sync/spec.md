@@ -120,8 +120,8 @@ The admission gate SHALL refuse a feed entry that carries **no `transform`**, on
 characters of `/`-separated `[A-Za-z0-9._~-]+` segments, with no `.` or `..` segment, no leading or
 trailing `/`, and no `?`, `#` or `%`. ADAS refuses the same shapes at declaration. The runner checks them
 again because the route becomes part of a URL it sends with its own credentials, and a remote invariant
-is not a safe guard for that. An entry whose `transform.response_jsonata` does not compile SHALL also be
-refused, naming it, rather than failing on every call. Neither is a routable pipeline: the lane is chosen
+is not a safe guard for that. An entry with an output whose `source` does not compile SHALL also be
+refused, naming that output, rather than failing on every call. Neither is a routable pipeline: the lane is chosen
 from `transform.type`, and the row and group lanes both read the grain or group column out of every
 scanned row by that key.
 

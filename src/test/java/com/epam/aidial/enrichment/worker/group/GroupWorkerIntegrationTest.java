@@ -153,7 +153,7 @@ class GroupWorkerIntegrationTest {
 
     /**
      * A {@code dial_app_route} group pipeline: the members reach the application's route as structured JSON through
-     * {@code {{members:json}}}, the route's nested reply is flattened by {@code response_jsonata}, and no chat
+     * {@code {{members:json}}}, the route's nested reply is read by the output's {@code source}, and no chat
      * envelope, {@code response_format} or {@code api-version} is involved.
      */
     @Test
@@ -166,7 +166,6 @@ class GroupWorkerIntegrationTest {
                 .readyWhen(new ReadyWhenDto(null, "10m", null, null))
                 .model("insights-app")
                 .appRoute("insights")
-                .responseJsonata("{\"topic\": summary.topic}")
                 .requestTemplate("{\"members\": {{members:json}}}")
                 .responseSchema(Map.of(
                         "type", "object",
@@ -174,7 +173,7 @@ class GroupWorkerIntegrationTest {
                         "additionalProperties", false,
                         "properties", Map.of("topic", Map.of("type", "string"))))
                 .transformInputs(TestPipelines.columnVar("text", "request_body"))
-                .outputs(List.of(new OutputDto("topic", "topic", null)))
+                .outputs(List.of(new OutputDto("topic", "topic", null, "summary.topic")))
                 .build()));
         stubMembers(false, "hi there", "any update?");
         String routePath = "/v1/deployments/insights-app/route/insights";

@@ -20,9 +20,10 @@
   extraction, repair support and usage. The chat strategy reproduces today's behavior exactly. The route
   strategy adds no `response_format`, extracts the whole body, does no repair, and reports usage as one
   call.
-- [x] 2.3a Compile `transform.response_jsonata` once per generation, and evaluate it over the parsed route
-  body before validation. A non-object result, an evaluation error and a non-JSON body each dead-letter at
-  `validate` with the raw body. Admission refuses an expression that does not compile.
+- [x] 2.3a Assemble a route's output from the parsed body by each resolved output's `source` (compiled once
+  through `JsonataEvaluator`), or by its name. A value that evaluates to nothing is left out. A body that is not a
+  JSON object and a failing `source` each dead-letter at `validate` with the raw body. Admission refuses a
+  `source` that does not compile, naming its output.
 - [x] 2.4 Route `TransformInvoker.invoke` and `callWithRepair` through the strategy, and add a `preset`
   span attribute.
 - [x] 2.5 Record spend for a route call with `SpendService.record(..., 0, "calls", failure)`.
@@ -41,7 +42,8 @@
   - the exact path, and no `api-version`;
   - a body without `response_format`;
   - the whole body mapped to columns;
-  - a nested body flattened by `response_jsonata`, with an extra `usage` member ignored.
+  - a nested body read by an output `source`, with an extra `usage` member ignored;
+  - an absent optional field written as NULL.
 - [x] 4.2 An invalid route body is dead-lettered at `validate` after exactly one call. `503` retries and
   `400` dead-letters at the DIAL-call stage.
 - [x] 4.3 Spend shows 2 calls and 0 tokens for two route calls, and the calls budget pauses the pipeline.

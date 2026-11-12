@@ -48,7 +48,7 @@ public final class AdasContract {
      * for; the bump turns that into one refusal of the whole build instead.
      *
      * <p><b>5 since ADAS added the {@code dial_app_route} transform preset.</b> An entry's {@code transform.preset}
-     * may then be {@code dial_app_route}, carrying {@code route} and an optional {@code response_jsonata}. A build
+     * may then be {@code dial_app_route}, carrying {@code route}, and its outputs an optional {@code source}. A build
      * speaking 4 cannot decode the preset; the bump refuses it as a whole rather than entry by entry.
      */
     public static final int VERSION = 5;

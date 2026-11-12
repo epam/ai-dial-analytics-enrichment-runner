@@ -121,7 +121,6 @@ public final class TestPipelines {
         private Map<String, Object> params;
         private TransformPreset preset = TransformPreset.CHAT_COMPLETION;
         private String route;
-        private String responseJsonata;
         /**
          * Defaulted, because the compiled feed always carries one for a model-calling transform: ADAS serves
          * the declaration's stored schema where it has one and otherwise the schema it composed from the
@@ -223,11 +222,6 @@ public final class TestPipelines {
             return this;
         }
 
-        public Builder responseJsonata(String responseJsonata) {
-            this.responseJsonata = responseJsonata;
-            return this;
-        }
-
         public Builder params(Map<String, Object> params) {
             this.params = params;
             return this;
@@ -260,7 +254,7 @@ public final class TestPipelines {
                     sql ? null : params,
                     sql ? null : requestTemplate,
                     sql || transformInputs == null ? null : new LinkedHashMap<>(transformInputs),
-                    null, sql ? null : route, sql ? null : responseJsonata);
+                    null, sql ? null : route);
             AdvancedDto advanced = new AdvancedDto(1000, rowsPerCall, 60, sampleFraction);
             return new PipelineDto(
                     name, transform, sql ? null : responseSchema, grainKey, versionColumn,

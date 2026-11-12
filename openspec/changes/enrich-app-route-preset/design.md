@@ -63,6 +63,18 @@ second `RestClient` bean that shares the base URL, the `Api-Key` header and the 
 The `calls` unit already exists in `SpendService`. A route pipeline is bounded by the calls budget. An
 application's own `usage` block is not interpreted, since its shape is the application's own.
 
+### The output is assembled per output, from each output's `source`
+
+The runner walks the resolved `outputs`, which ADAS already serves one entry per mapped column. Each entry is
+evaluated as its `source` over the parsed body, or read as the member of its own name. The assembled object, not
+the body, is validated and mapped. Members of the body that no output reads never reach validation, and nested
+members are reached with a dotted-path `source`. Each `source` goes through `JsonataEvaluator`, which compiles
+an expression once and evaluates it under the existing time and depth bounds. A value that evaluates to nothing
+is left out, so ADAS's route schema, built from column nullability, decides whether that output may be absent.
+
+- *Alternative: one transform-level expression reshaping the whole body.* Rejected. It is one long script to
+  author and check, and nothing guarantees it produces every output.
+
 ### `{{name:json}}` in the same single pass
 
 The placeholder pattern gains an optional `:json` group. The name before the suffix is what the
@@ -75,9 +87,11 @@ The constant is raised in `AdasContract`, and `FeedShapeTest` / `TestPipelines` 
 
 ## Risks / Trade-offs
 
-- **A route answering extra top-level members fails strict validation** (`additionalProperties: false`
-  on a composed schema).
-  → This is the specified contract. The application answers the bare output object.
+- **A `source` an author mistypes yields nothing**, and the output is then absent.
+  → For a non-nullable column the schema still requires the output, so the unit is dead-lettered at `validate`
+  with the raw body, which shows what the path should have been. For a nullable column NULL is written, which
+  is indistinguishable from an application that omitted the field. The UI suggesting the path from the column
+  name is the mitigation.
 - **No repair means a flaky application dead-letters more readily than a model would.**
   → Transient statuses (5xx/429/408/425) still retry with backoff. Only a 2xx with a wrong body goes
   straight to the DLQ, which is requeueable.

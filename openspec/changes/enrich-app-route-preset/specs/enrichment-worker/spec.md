@@ -12,9 +12,9 @@ on `transform.preset`:
   first choice's message content.
 - **`dial_app_route`**: the body is the rendered template overlaid with `transform.params`, with no
   `response_format`. It is POSTed to `/v1/deployments/{model}/route/{route}` with no `api-version`, and the
-  output is the **whole response body**, parsed as JSON, or, when the transform declares `response_jsonata`,
-  that expression's result over it. There is no chat
-  envelope to unwrap. The route is appended segment by segment, each segment percent-encoded as a path
+  output is assembled from the parsed response body by the outputs' `source` expressions (see "A route
+  output's value is read from the response by its source before validation"). There is no chat envelope to
+  unwrap. The route is appended segment by segment, each segment percent-encoded as a path
   segment, so no character of it can change the URL's structure. `response_format` and `api-version` are
   parts of the chat-completions contract that an application route does not take part in, so sending
   them would only hand the route members it did not ask for.
@@ -51,8 +51,8 @@ as authored".
   `route: v1/insights`
 - **WHEN** a unit of work is processed
 - **THEN** the rendered body is POSTed to `/v1/deployments/insights-app/route/v1/insights` with no
-  `api-version` query parameter and no `response_format` member, and the whole response body is read as
-  the output
+  `api-version` query parameter and no `response_format` member, and the output is assembled from the
+  response body
 
 #### Scenario: A route failure is classified like a model failure
 
@@ -108,28 +108,43 @@ reaches this path unvalidated.
 
 ## ADDED Requirements
 
-### Requirement: A route response is reshaped by the transform's response mapping before validation
+### Requirement: A route output's value is read from the response by its source before validation
 
-When a `dial_app_route` transform carries `response_jsonata`, the runner SHALL evaluate it over the route's
-parsed response body. The result SHALL be the output: the object validated against the entry's
-`response_schema`, and the object the output mapping then reads. That makes the order parse → reshape →
-validate → map. A body that is not JSON, an expression that fails to evaluate, and a result that is not a
-JSON object SHALL each be a validation failure. The unit is dead-lettered at stage `validate` with the
-**raw route body** attached, not the reshaped one, because the raw body is what an operator needs in
-order to fix the expression. The expression SHALL be compiled once per pipeline generation, not once per
-call.
+For a `dial_app_route` pipeline the runner SHALL assemble the output from the route's parsed response body,
+one resolved `outputs` entry at a time:
 
-#### Scenario: A nested route response is flattened and written
+- an entry carrying `source` takes the result of that JSONata expression evaluated over the body;
+- an entry without one takes the body member named by the entry's `name`.
 
-- **GIVEN** a route answering `{"title":"t","intent_counts":{"check":2},"usage":{"cost":1}}`, and
-  `response_jsonata` `{"title": title, "intent_counts__check": intent_counts.check}`
+A value that evaluates to nothing SHALL be left out of the assembled object, so the entry's `response_schema`
+decides whether that output may be absent. ADAS composes a route's schema from column nullability. The
+assembled object, keyed by output name, SHALL be what is validated and what the output mapping reads. That makes
+the order parse → assemble → validate → map, and a member of the body that no output reads never reaches
+validation.
+
+A body that is not a JSON object, a `source` that fails to evaluate, and an assembled value that fails the
+schema SHALL each be a validation failure. The unit is dead-lettered at stage `validate` with the **raw route
+body** attached, not the assembled one, because the raw body is what an operator needs to fix a `source`. A
+`source` failure names its output. Each `source` SHALL be compiled once and reused, not compiled per call.
+
+#### Scenario: Nested route fields are read by their sources and written
+
+- **GIVEN** a route answering `{"title":"t","intent_counts":{"check":2},"usage":{"cost":1}}`, and outputs
+  `title` with no `source` and `intent_counts__check` with `source` `intent_counts.check`
 - **WHEN** the unit of work is processed
 - **THEN** `{"title":"t","intent_counts__check":2}` is validated and mapped, and the `usage` member is never
   seen by validation
 
-#### Scenario: A mapping that yields no object is dead-lettered with the raw body
+#### Scenario: An absent optional field is written as NULL
 
-- **GIVEN** a `response_jsonata` that evaluates to a string for the route's body
+- **GIVEN** an output `cost` with `source` `usage.cost` whose schema property accepts `null` and is not
+  required, and a route answering without `usage`
+- **WHEN** the unit of work is processed
+- **THEN** the row is written with `cost` NULL
+
+#### Scenario: A source yielding the wrong type is dead-lettered with the raw body
+
+- **GIVEN** an output whose `source` yields an object for a `string` property
 - **WHEN** the unit of work is processed
 - **THEN** a `dlq_item` at stage `validate` is recorded carrying the route's raw body, after exactly one call
 

@@ -36,8 +36,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The row lane calling a DIAL application route ({@code transform.preset: dial_app_route}): the call's path, body
- * and missing chat members, the whole reply as the output or reshaped by {@code response_jsonata}, the refusals that
- * dead-letter at {@code validate} after one call, status classification, spend counted in calls, and the route's own
+ * and missing chat members, the output assembled from the reply by name or by each output's {@code source}, an
+ * absent optional field written as NULL, the refusals that dead-letter at {@code validate} after one call, status classification, spend counted in calls, and the route's own
  * read timeout. DIAL and ADAS are stubbed on one WireMock server; PostgreSQL runs in Testcontainers.
  */
 @SpringBootTest
@@ -97,7 +97,7 @@ class AppRouteWorkerIntegrationTest {
     }
 
     @Test
-    void wholeRouteReplyIsTheOutput() {
+    void outputReadsTheReplyMemberOfItsName() {
         pipelineCache.replaceAll(Map.of(PIPELINE_NAME, routePipeline(null)));
         BACKEND.stubFor(post(urlPathEqualTo(ROUTE_PATH)).willReturn(okJson("{\"label\":\"positive\"}")));
 
@@ -115,8 +115,8 @@ class AppRouteWorkerIntegrationTest {
     }
 
     @Test
-    void nestedReplyIsFlattenedByTheResponseMappingAndItsExtraMembersNeverReachValidation() {
-        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, routePipeline("{\"label\": result.label}")));
+    void nestedReplyIsReadByTheOutputSourceAndItsExtraMembersNeverReachValidation() {
+        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, routePipeline("result.label")));
         BACKEND.stubFor(post(urlPathEqualTo(ROUTE_PATH)).willReturn(okJson(
                 "{\"result\":{\"label\":\"negative\"},\"usage\":{\"cost\":1}}")));
 
@@ -127,9 +127,34 @@ class AppRouteWorkerIntegrationTest {
     }
 
     @Test
-    void invalidRouteReplyIsDeadLetteredAfterOneCallWithTheRawBody() {
+    void absentOptionalFieldIsWrittenAsNull() {
+        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, TestPipelines.builder(PIPELINE_NAME)
+                .generation(3)
+                .model("insights-app")
+                .appRoute("v1/insights")
+                .requestTemplate("{\"text\": {{prompt:json}}}")
+                .responseSchema(Map.of(
+                        "type", "object",
+                        "required", List.of("label"),
+                        "additionalProperties", false,
+                        "properties", Map.of(
+                                "label", Map.of("type", "string"),
+                                "cost", Map.of("type", List.of("number", "null")))))
+                .outputs(List.of(new OutputDto("label", "sentiment", null),
+                        new OutputDto("cost", "cost", null, "usage.cost")))
+                .build()));
+        BACKEND.stubFor(post(urlPathEqualTo(ROUTE_PATH)).willReturn(okJson("{\"label\":\"positive\"}")));
+
+        process();
+
+        Map<String, Object> row = upsertedRow();
+        assertThat(row).containsEntry("sentiment", "positive").containsEntry("cost", null);
+    }
+
+    @Test
+    void invalidAssembledOutputIsDeadLetteredAfterOneCallWithTheRawBody() {
         pipelineCache.replaceAll(Map.of(PIPELINE_NAME, routePipeline(null)));
-        String raw = "{\"label\":\"positive\",\"usage\":{\"cost\":1}}";
+        String raw = "{\"label\":5}";
         BACKEND.stubFor(post(urlPathEqualTo(ROUTE_PATH)).willReturn(okJson(raw)));
 
         process();
@@ -141,8 +166,8 @@ class AppRouteWorkerIntegrationTest {
     }
 
     @Test
-    void mappingThatYieldsNoObjectIsDeadLetteredWithTheRawBody() {
-        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, routePipeline("result.label")));
+    void sourceYieldingTheWrongTypeIsDeadLetteredWithTheRawBody() {
+        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, routePipeline("result")));
         String raw = "{\"result\":{\"label\":\"negative\"}}";
         BACKEND.stubFor(post(urlPathEqualTo(ROUTE_PATH)).willReturn(okJson(raw)));
 
@@ -218,16 +243,15 @@ class AppRouteWorkerIntegrationTest {
                 List.of(new ChunkRow("e0", Map.of("prompt", "great product")))));
     }
 
-    private static PipelineDto routePipeline(String responseJsonata) {
+    private static PipelineDto routePipeline(String labelSource) {
         return TestPipelines.builder(PIPELINE_NAME)
                 .generation(3)
                 .model("insights-app")
                 .appRoute("v1/insights")
-                .responseJsonata(responseJsonata)
                 .requestTemplate("{\"text\": {{prompt:json}}}")
                 .params(Map.of("temperature", 0))
                 .responseSchema(labelSchema())
-                .outputs(List.of(new OutputDto("label", "sentiment", null)))
+                .outputs(List.of(new OutputDto("label", "sentiment", null, labelSource)))
                 .build();
     }
 

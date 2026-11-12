@@ -11,9 +11,10 @@ runner half.
 
 - **New call path.** For `transform.preset: dial_app_route` the runner calls
   `POST {DIAL}/v1/deployments/{model}/route/{route}`. The body is the rendered template overlaid with
-  `transform.params`. There is no `response_format` and no `api-version`. The output is the **whole
-  response body**, or, when the transform declares `response_jsonata`, that expression's result over the
-  body. The mapping runs before validation, so an application keeps its own response shape.
+  `transform.params`. There is no `response_format` and no `api-version`. The output is assembled
+  from the response body: each output takes its `source` expression's result, or the member of its own name.
+  The mapping runs before validation, so an application keeps its own response shape, and a nullable output the
+  application omits is written as NULL.
   `chat_completion` is unchanged.
 - **Validation.** The route's output is validated against the entry's `response_schema` as a model's is,
   but **without the repair retry**. A route has no conversational turn to correct, so an invalid or

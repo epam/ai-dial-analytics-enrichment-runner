@@ -1,5 +1,6 @@
 package com.epam.aidial.enrichment.worker;
 
+import com.epam.aidial.enrichment.adas.dto.OutputDto;
 import com.epam.aidial.enrichment.adas.dto.PipelineDto;
 import com.epam.aidial.enrichment.adas.dto.TransformDto;
 import com.epam.aidial.enrichment.adas.dto.TransformPreset;
@@ -20,14 +21,13 @@ import java.util.Map;
 
 /**
  * The {@code dial_app_route} preset: the rendered body plus {@code params} is POSTed to the application's route with
- * no {@code response_format}, and the whole reply body is the output, reshaped first by the transform's
- * {@code response_jsonata} when it declares one. There is no repair, because a route's body has no conversation to
+ * no {@code response_format}, and the output is assembled from the reply body by each output's {@code source}, or its
+ * name when it declares none. There is no repair, because a route's body has no conversation to
  * append a correction to, and usage is counted as one call, because an application reports usage in a shape of its
  * own.
  *
- * <p>Every way the reply can fail to yield an output — a body that is not JSON, a mapping that fails or does not
- * produce an object — is a validation failure carrying the <b>raw</b> body, which is what an operator needs to fix
- * the mapping.
+ * <p>Every way the reply can fail to yield an output — a body that is not a JSON object, a {@code source} that fails —
+ * is a validation failure carrying the <b>raw</b> body, which is what an operator needs to fix the mapping.
  */
 @Component
 @RequiredArgsConstructor
@@ -59,6 +59,12 @@ class AppRouteCall implements DialCall {
         return dialClient.appRoute(transform.model(), transform.route(), body);
     }
 
+    /**
+     * Assembles the output from the route's body, one output at a time: each output's value is its {@code source}
+     * evaluated over the body, or the body member of its own name when it declares none. A value that evaluates to
+     * nothing is left out, so the schema decides whether that output may be absent. Only the assembled object is
+     * validated, so members of the body no output reads never reach validation.
+     */
     @Override
     public Reply read(PipelineDto pipeline, TransformDto transform, String raw) {
         Object parsed;
@@ -67,20 +73,29 @@ class AppRouteCall implements DialCall {
         } catch (RuntimeException e) {
             throw new ResponseValidationException("route response is not valid JSON", raw);
         }
-        Object output = parsed;
-        if (StringUtils.isNotBlank(transform.responseJsonata())) {
-            try {
-                output = jsonata.evaluate(transform.responseJsonata(), parsed);
-            } catch (RuntimeException e) {
-                throw new ResponseValidationException(
-                        "response_jsonata failed on the route response: " + ErrorMessages.classify(e), raw);
+        if (!(parsed instanceof Map<?, ?> body)) {
+            throw new ResponseValidationException("route response is not a JSON object", raw);
+        }
+        Map<String, Object> output = new LinkedHashMap<>();
+        for (OutputDto declared : pipeline.outputs()) {
+            Object value = valueOf(declared, body, parsed, raw);
+            if (value != null) {
+                output.put(declared.name(), value);
             }
         }
-        if (!(output instanceof Map<?, ?>)) {
-            throw new ResponseValidationException(StringUtils.isNotBlank(transform.responseJsonata())
-                    ? "response_jsonata did not produce a JSON object" : "route response is not a JSON object", raw);
-        }
         return new Reply(jsonMapper.writeValueAsString(output), raw, 0, SpendService.CALLS_UNIT);
+    }
+
+    private Object valueOf(OutputDto declared, Map<?, ?> body, Object parsed, String raw) {
+        if (StringUtils.isBlank(declared.source())) {
+            return body.get(declared.name());
+        }
+        try {
+            return jsonata.evaluate(declared.source(), parsed);
+        } catch (RuntimeException e) {
+            throw new ResponseValidationException("source of output '" + declared.name()
+                    + "' failed on the route response: " + ErrorMessages.classify(e), raw);
+        }
     }
 
     @Override

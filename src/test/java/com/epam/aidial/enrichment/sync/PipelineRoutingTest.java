@@ -171,7 +171,7 @@ class PipelineRoutingTest {
     void sqlTransformDeclaringInputsIsUnsupported() {
         PipelineDto pipeline = TestPipelines.builder("r-sql-inputs")
                 .transform(new TransformDto(TransformType.SQL, null, null, null, null,
-                        Map.of("text", new VarDto("request_body", null)), null, null, null))
+                        Map.of("text", new VarDto("request_body", null)), null, null))
                 .build();
         assertThat(PipelineRouting.unsupportedReason(pipeline))
                 .isEqualTo("sql transform declares transform.inputs, which a derivation renders no request for");
@@ -181,7 +181,7 @@ class PipelineRoutingTest {
     @Test
     void sqlTransformWithAnEmptyInputsMapIsAdmitted() {
         PipelineDto pipeline = TestPipelines.builder("r-sql-empty-inputs")
-                .transform(new TransformDto(TransformType.SQL, null, null, null, null, Map.of(), null, null, null))
+                .transform(new TransformDto(TransformType.SQL, null, null, null, null, Map.of(), null, null))
                 .outputs(List.of(new OutputDto("model_name", "model_name", null)))
                 .build();
         assertThat(PipelineRouting.unsupportedReason(pipeline)).isNull();
@@ -206,7 +206,7 @@ class PipelineRoutingTest {
     void sqlPipelineDeclaringModelIsUnsupported() {
         // A sql transform must carry no model; one that does is not the contract the runner drives.
         PipelineDto pipeline = TestPipelines.builder("r5")
-                .transform(new TransformDto(TransformType.SQL, null, "gpt-4o", null, null, null, null, null, null))
+                .transform(new TransformDto(TransformType.SQL, null, "gpt-4o", null, null, null, null, null))
                 .build();
         assertThat(PipelineRouting.unsupportedReason(pipeline)).contains("declares a model");
     }
@@ -430,7 +430,7 @@ class PipelineRoutingTest {
     @Test
     void wellFormedAppRouteIsAdmitted() {
         PipelineDto pipeline = TestPipelines.builder("r-route").appRoute("v1/insights")
-                .responseJsonata("{\"label\": result.label}").build();
+                .outputs(List.of(new OutputDto("label", "label", null, "result.label"))).build();
 
         assertThat(PipelineRouting.unsupportedReason(pipeline)).isNull();
     }
@@ -446,9 +446,10 @@ class PipelineRoutingTest {
     }
 
     @Test
-    void appRouteWhoseResponseMappingDoesNotCompileIsRefused() {
-        PipelineDto pipeline = TestPipelines.builder("r-route").appRoute("insights").responseJsonata("{title: ").build();
+    void appRouteWhoseOutputSourceDoesNotCompileIsRefused() {
+        PipelineDto pipeline = TestPipelines.builder("r-route").appRoute("insights")
+                .outputs(List.of(new OutputDto("label", "label", null, "{title: "))).build();
 
-        assertThat(PipelineRouting.unsupportedReason(pipeline)).contains("response_jsonata");
+        assertThat(PipelineRouting.unsupportedReason(pipeline)).contains("'label'").contains("source");
     }
 }

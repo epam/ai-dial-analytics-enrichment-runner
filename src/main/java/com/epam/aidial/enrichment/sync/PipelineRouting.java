@@ -1,6 +1,7 @@
 package com.epam.aidial.enrichment.sync;
 
 import com.dashjoin.jsonata.Jsonata;
+import com.epam.aidial.enrichment.adas.dto.OutputDto;
 import com.epam.aidial.enrichment.adas.dto.PipelineDto;
 import com.epam.aidial.enrichment.adas.dto.ReadyWhenDto;
 import com.epam.aidial.enrichment.adas.dto.TransformPreset;
@@ -204,10 +205,11 @@ public final class PipelineRouting {
             if (routeProblem != null) {
                 return "app-route transform's route " + routeProblem;
             }
-            if (StringUtils.isNotBlank(pipeline.transform().responseJsonata())
-                    && !compiles(pipeline.transform().responseJsonata())) {
-                // Refused once here rather than dead-lettering every unit after its route call was paid for.
-                return "app-route transform's response_jsonata does not compile";
+            for (OutputDto output : pipeline.outputs()) {
+                if (StringUtils.isNotBlank(output.source()) && !compiles(output.source())) {
+                    // Refused once here rather than dead-lettering every unit after its route call was paid for.
+                    return "app-route output '" + output.name() + "' has a source that does not compile";
+                }
             }
         }
         if (isModelCalling(pipeline)
