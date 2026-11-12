@@ -11,7 +11,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
 /**
- * Calls DIAL Core chat/completions for a deployment. The runner sends a fully-rendered request body
+ * Calls DIAL Core for a deployment: its chat/completions endpoint, or one of an application's routes. The runner sends a fully-rendered request body
  * (messages + {@code response_format = json_schema} + the transform's params) and returns the raw response
  * body for the worker to parse. A non-2xx response surfaces as a
  * {@code RestClientResponseException} the worker routes per the failure taxonomy.
@@ -30,8 +30,12 @@ public class DialClient {
 
     private static final String API_VERSION_PARAM = "api-version";
 
+    private static final String ROUTE_SEPARATOR = "/";
+
     @Qualifier(DialClientConfiguration.DIAL_REST_CLIENT)
     private final RestClient restClient;
+    @Qualifier(DialClientConfiguration.DIAL_ROUTE_REST_CLIENT)
+    private final RestClient routeRestClient;
     private final DialProperties properties;
 
     public String chatCompletion(String deployment, String requestBodyJson) {
@@ -43,6 +47,25 @@ public class DialClient {
                     }
                     return uriBuilder.build(deployment);
                 })
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(requestBodyJson)
+                .retrieve()
+                .body(String.class);
+    }
+
+    /**
+     * POSTs {@code requestBodyJson} to an application route, {@code /v1/deployments/{deployment}/route/{route}}, and
+     * returns the raw response body. The route is appended one segment at a time, each encoded as a path segment, so
+     * no character of it can change the URL's structure; admission has already refused a route outside the grammar.
+     * There is no {@code api-version}: that is a chat-completions adapter parameter an application route does not
+     * take.
+     */
+    public String appRoute(String deployment, String route, String requestBodyJson) {
+        return routeRestClient.post()
+                .uri(uriBuilder -> uriBuilder
+                        .pathSegment("v1", "deployments", deployment, "route")
+                        .pathSegment(route.split(ROUTE_SEPARATOR))
+                        .build())
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(requestBodyJson)
                 .retrieve()

@@ -207,7 +207,7 @@ whole; a group fetch needs the extra room. Raise the two together.
 
 ### DIAL Core
 
-The worker's chat/completions calls. One `Api-Key` can serve both ADAS auth and model calls, so
+The worker's chat/completions and application-route calls. One `Api-Key` can serve both ADAS auth and model calls, so
 `DIAL_API_KEY` falls back to `ADAS_API_KEY`. The Class-1 lane makes no DIAL calls and is unaffected by
 everything here.
 
@@ -218,6 +218,7 @@ everything here.
 | `DIAL_API_VERSION`          | `dial.api-version`          | `2025-01-01-preview`    | No        | The `api-version` query parameter on every chat/completions call. Core forwards the query string verbatim and the Azure-OpenAI-compatible adapters reject a request without it, so match what the target deployment's adapter expects. Blank omits the parameter. |
 | `DIAL_CONNECT_TIMEOUT_MS`   | `dial.connect-timeout-ms`   | `5000`                  | No        | HTTP connect timeout for DIAL calls.                                                                                                                                                                                                                              |
 | `DIAL_READ_TIMEOUT_MS`      | `dial.read-timeout-ms`      | `60000`                 | No        | HTTP read timeout for DIAL calls.                                                                                                                                                                                                                                 |
+| `DIAL_ROUTE_READ_TIMEOUT_MS` | `dial.route-read-timeout-ms` | `180000`              | No        | HTTP read timeout for application-route calls (`preset: dial_app_route`); `DIAL_READ_TIMEOUT_MS` keeps applying to chat calls.                                                                                  |
 | `DIAL_DEFAULT_RPM`          | `dial.default-rpm`          | `60`                    | No        | Per-pipeline requests per minute when a pipeline declares no `advanced.rate_rpm`. Per-process, so DIAL Core's own per-key limit is the real backstop.                                                                                                             |
 | `DIAL_RATE_LIMITER_TIMEOUT` | `dial.rate-limiter-timeout` | `5s`                    | No        | How long a worker waits for a rate-limit permit before failing the chunk, which then retries with backoff.                                                                                                                                                        |
 

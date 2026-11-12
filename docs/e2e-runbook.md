@@ -283,6 +283,33 @@ curl -s 'localhost:5100/v1/pipelines/<pipeline-name>/groups?limit=2&cursor=<next
 curl -s 'localhost:5100/v1/pipelines/<pipeline-name>/groups?order=newest&limit=5' | jq '[.groups[] | {group_key, last_activity_at}]'
 ```
 
+### A group pipeline calling a DIAL application route
+
+`preset: dial_app_route` POSTs the rendered body to `/v1/deployments/{model}/route/{route}` instead of chat
+completions, with no `response_format` and no `api-version`. `{{members:json}}` puts the members into the body as a
+JSON array rather than an escaped string, and `response_jsonata` maps the route's own reply onto the outputs before
+validation. ADAS arms the pipeline only once an administrator has allowed the pair.
+
+```bash
+curl -s -X PUT localhost:5000/v1/settings/app-routes -H 'Content-Type: application/json' \
+  -d '{"routes":[{"deployment":"insights-app","route":"insights"}]}'
+
+curl -s -X POST localhost:5000/v1/pipelines -H 'Content-Type: application/json' -d '{
+  "name":"chat-topic-route","kind":"enrich","target":"usage_chat_topic",
+  "trigger":{"kind":"group","group_by":"chat_id","ready_when":{"idle":"30s"}},
+  "transform":{"type":"llm","preset":"dial_app_route","model":"insights-app","route":"insights",
+               "request_template":"{\"members\": {{members:json}}}",
+               "response_jsonata":"{\"topic\": summary.topic}",
+               "inputs":{"text":{"column":"request_body"}},
+               "outputs":{"topic":"the conversation topic in two or three words"}},
+  "enabled":true
+}'
+```
+
+A route reply that fails the schema, is not JSON, or that the mapping turns into anything but an object is
+dead-lettered at `validate` after one call, carrying the raw reply; there is no repair retry. Each call is counted in
+`spend_counter` as one call with no tokens.
+
 ## 9. Class-1 (SQL) enrichment — zero DIAL traffic
 
 The target is an ordinary row-grain enrichment, except that `enriched_at` must be declared `timestamp`:

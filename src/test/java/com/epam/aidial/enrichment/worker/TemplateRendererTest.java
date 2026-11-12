@@ -175,4 +175,43 @@ class TemplateRendererTest {
     private Map<String, Object> parse(String json) {
         return jsonMapper.readValue(json, new TypeReference<>() { });
     }
+
+    // --- {{name:json}}: a value as a JSON literal in value position -----------------------------------------
+
+    @Test
+    void rawMembersRenderAsJsonArray() {
+        String out = renderer.render("{\"members\": {{members:json}}}",
+                Map.of("members", List.of(Map.of("text", "a"), Map.of("text", "b \"quoted\""))));
+
+        assertThat(parse(out).get("members")).isEqualTo(List.of(Map.of("text", "a"), Map.of("text", "b \"quoted\"")));
+    }
+
+    @Test
+    void rawNullRendersAsJsonNull() {
+        Map<String, Object> inputs = new HashMap<>();
+        inputs.put("note", null);
+
+        assertThat(renderer.render("{\"note\": {{note:json}}}", inputs)).isEqualTo("{\"note\": null}");
+    }
+
+    @Test
+    void rawStringRendersQuotedOnce() {
+        String out = renderer.render("{\"s\": {{s:json}}}", Map.of("s", "he said \"hi\""));
+
+        assertThat(parse(out)).containsEntry("s", "he said \"hi\"");
+    }
+
+    @Test
+    void unboundRawPlaceholderFailsNamingTheVariable() {
+        assertThatThrownBy(() -> renderer.render("{\"x\": {{missing:json}}}", Map.of()))
+                .isInstanceOf(UnresolvedPlaceholderException.class)
+                .hasMessageContaining("missing");
+    }
+
+    @Test
+    void unknownSuffixFailsAsUnbound() {
+        assertThatThrownBy(() -> renderer.render("{\"x\": {{members:yaml}}}", Map.of("members", List.of())))
+                .isInstanceOf(UnresolvedPlaceholderException.class)
+                .hasMessageContaining("members:yaml");
+    }
 }

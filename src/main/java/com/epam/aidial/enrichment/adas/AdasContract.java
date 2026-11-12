@@ -46,8 +46,12 @@ public final class AdasContract {
      * write-back requires it back, unchanged, on every row. A build still speaking 3 drops the member, so every
      * write-back to such a target would be refused row by row and dead-lettered after its model call was paid
      * for; the bump turns that into one refusal of the whole build instead.
+     *
+     * <p><b>5 since ADAS added the {@code dial_app_route} transform preset.</b> An entry's {@code transform.preset}
+     * may then be {@code dial_app_route}, carrying {@code route} and an optional {@code response_jsonata}. A build
+     * speaking 4 cannot decode the preset; the bump refuses it as a whole rather than entry by entry.
      */
-    public static final int VERSION = 4;
+    public static final int VERSION = 5;
 
     /** {@link #VERSION} on the wire, resolved once so the header value and the comparison cannot disagree. */
     public static final String VERSION_VALUE = Integer.toString(VERSION);

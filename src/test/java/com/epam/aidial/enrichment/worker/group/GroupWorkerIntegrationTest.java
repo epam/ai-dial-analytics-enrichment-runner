@@ -24,6 +24,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.sql.Timestamp;
@@ -148,6 +149,51 @@ class GroupWorkerIntegrationTest {
         // Both members, correlated with their own fields, in one interpolated array.
         assertThat(prompt).contains("\\\"text\\\":\\\"hi there\\\"");
         assertThat(prompt).contains("\\\"text\\\":\\\"any update?\\\"");
+    }
+
+    /**
+     * A {@code dial_app_route} group pipeline: the members reach the application's route as structured JSON through
+     * {@code {{members:json}}}, the route's nested reply is flattened by {@code response_jsonata}, and no chat
+     * envelope, {@code response_format} or {@code api-version} is involved.
+     */
+    @Test
+    void appRouteGroupSendsStructuredMembersAndMapsTheReply() {
+        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, TestPipelines.builder(PIPELINE_NAME)
+                .generation(3)
+                .triggerKind(TriggerKind.GROUP)
+                .groupBy("chat_id")
+                .grainKey("chat_id")
+                .readyWhen(new ReadyWhenDto(null, "10m", null, null))
+                .model("insights-app")
+                .appRoute("insights")
+                .responseJsonata("{\"topic\": summary.topic}")
+                .requestTemplate("{\"members\": {{members:json}}}")
+                .responseSchema(Map.of(
+                        "type", "object",
+                        "required", List.of("topic"),
+                        "additionalProperties", false,
+                        "properties", Map.of("topic", Map.of("type", "string"))))
+                .transformInputs(TestPipelines.columnVar("text", "request_body"))
+                .outputs(List.of(new OutputDto("topic", "topic", null)))
+                .build()));
+        stubMembers(false, "hi there", "any update?");
+        String routePath = "/v1/deployments/insights-app/route/insights";
+        BACKEND.stubFor(post(urlPathEqualTo(routePath)).willReturn(okJson(
+                "{\"summary\":{\"topic\":\"billing\"},\"usage\":{\"cost\":1}}")));
+        stubRows();
+
+        worker.process("item-1", payload());
+        drainWrites();
+
+        var calls = BACKEND.findAll(postRequestedFor(urlPathEqualTo(routePath)));
+        assertThat(calls).hasSize(1);
+        assertThat(calls.getFirst().getQueryParams()).isEmpty();
+        Map<String, Object> sent = jsonMapper.readValue(calls.getFirst().getBodyAsString(),
+                new TypeReference<Map<String, Object>>() { });
+        assertThat(sent).doesNotContainKey("response_format");
+        assertThat((List<?>) sent.get("members")).hasSize(2)
+                .allSatisfy(member -> assertThat(member).isInstanceOf(Map.class));
+        assertThat(upsertedRow()).containsEntry("topic", "billing").containsEntry("model", "insights-app");
     }
 
     @Test

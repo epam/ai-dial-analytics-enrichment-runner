@@ -1,10 +1,13 @@
 package com.epam.aidial.enrichment.sync;
 
+import com.dashjoin.jsonata.Jsonata;
 import com.epam.aidial.enrichment.adas.dto.PipelineDto;
 import com.epam.aidial.enrichment.adas.dto.ReadyWhenDto;
+import com.epam.aidial.enrichment.adas.dto.TransformPreset;
 import com.epam.aidial.enrichment.adas.dto.TransformType;
 import com.epam.aidial.enrichment.adas.dto.TriggerKind;
 import com.epam.aidial.enrichment.class1.Class1MaterializeTask;
+import com.epam.aidial.enrichment.dial.RoutePath;
 import com.epam.aidial.enrichment.scan.PipelineScanTask;
 import com.epam.aidial.enrichment.scan.ScheduleFactory;
 import org.apache.commons.lang3.StringUtils;
@@ -194,6 +197,19 @@ public final class PipelineRouting {
             // fails per row — after the template has rendered and the request has been built.
             return "llm transform declares no model, so no deployment could be called";
         }
+        if (isModelCalling(pipeline) && pipeline.transform().preset() == TransformPreset.DIAL_APP_ROUTE) {
+            // The route becomes part of a URL called with the runner's own credentials. ADAS refuses a malformed
+            // one when the pipeline is armed, and this arm re-checks it rather than trusting a remote invariant.
+            String routeProblem = RoutePath.problem(pipeline.transform().route()).orElse(null);
+            if (routeProblem != null) {
+                return "app-route transform's route " + routeProblem;
+            }
+            if (StringUtils.isNotBlank(pipeline.transform().responseJsonata())
+                    && !compiles(pipeline.transform().responseJsonata())) {
+                // Refused once here rather than dead-lettering every unit after its route call was paid for.
+                return "app-route transform's response_jsonata does not compile";
+            }
+        }
         if (isModelCalling(pipeline)
                 && (pipeline.responseSchema() == null || pipeline.responseSchema().isEmpty())) {
             // The second paid-for failure on this lane, and the one that has actually happened.
@@ -218,6 +234,15 @@ public final class PipelineRouting {
             return "model-calling pipeline has no response schema, so the model would be unconstrained";
         }
         return null;
+    }
+
+    private static boolean compiles(String expression) {
+        try {
+            Jsonata.jsonata(expression);
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /**
