@@ -1,9 +1,9 @@
-# Enrichment Runner release-0.4 — upgrade notes
+# Enrichment Runner 0.23.0 — upgrade notes
 
-How to move a runner from **0.3** to **0.4**. A runner on an older build first follows
+How to move a runner from **0.3** to **0.23.0**. A runner on an older build first follows
 [`release-0.3-upgrade.md`](release-0.3-upgrade.md) to 0.3.
 
-The runner moves as a pair with **ADAS 0.4**. Follow ADAS's own `docs/release-0.4-upgrade.md` for its
+The runner moves as a pair with **ADAS 0.23.0**. Follow ADAS's own `docs/release-0.23.0-upgrade.md` for its
 side. The contract version rises from `3` to `4`, and neither build works with the other's previous
 release, so both are upgraded in one window. The main change is on ADAS: row-grain enrichments are
 **aligned** with their source's partitions. The runner's part is small: for a per-row LLM pipeline over an
@@ -12,6 +12,17 @@ on every write-back row.
 
 The runner also closes the API description in `oidc` mode: it now needs a `FULL_ADMIN` credential (§2).
 
+## Why 0.23.0 and not 0.4
+
+0.23.0 comes straight after 0.3. There were no releases from 0.4 to 0.22. This is the first release of the
+Enrichment Runner and ADAS as open source on GitHub, and both now use the same version numbers as the other DIAL
+Admin services, which are also at 0.23.0. The release contains what was planned as 0.4. The earlier upgrade notes
+keep their old numbers.
+
+**The image registry has changed.** Images are now published from the public repositories to a different registry.
+Update the image repository in your deployment values (§1). The Helm chart for this release already points at the
+new location. The images themselves are built the same way.
+
 ---
 
 ## 1. Upgrade procedure
@@ -19,7 +30,8 @@ The runner also closes the API description in `oidc` mode: it now needs a `FULL_
 ### Before the window — on the old build
 
 Set `DISABLE_SWAGGER_AUTHORIZATION=true` before the deploy if people open the Swagger UI or fetch
-`/v3/api-docs` without a token in `oidc` mode (§2). Nothing else changes in your values.
+`/v3/api-docs` without a token in `oidc` mode (§2). Point the image repository at the new registry (see above).
+Nothing else changes in your values.
 
 Convert operator pauses into stops (§2): list `GET /v1/pipelines/paused`, and for each entry whose `origin` is
 `operator`, set `enabled: false` on the pipeline in ADAS. The deploy restarts the runner, which clears every pause
@@ -29,8 +41,8 @@ anyway; this keeps a pipeline stopped on purpose stopped.
 
 1. **Scale the runner to 0** and wait for the pod to be gone. A rolling update is not enough: an old and a
    new pod would overlap against a half-updated ADAS.
-2. **Deploy ADAS 0.4.**
-3. **Deploy runner 0.4.** There is no migration.
+2. **Deploy ADAS 0.23.0.**
+3. **Deploy runner 0.23.0.** There is no migration.
 4. **Scale the runner back to 1.** Readiness stays DOWN until the first pipeline sync succeeds, so a Ready
    pod confirms the pair matches.
 
@@ -49,7 +61,7 @@ dependent rollups lag until a cadence after the runner is back. Keep the window 
 **No runner state is migrated or discarded.** Scan cursors, Class-1 positions, group state and queued work
 are untouched.
 
-**Rollback is closed.** A 0.3 runner speaks contract `3`, and ADAS 0.4 refuses it. Fix a failing new
+**Rollback is closed.** A 0.3 runner speaks contract `3`, and ADAS 0.23.0 refuses it. Fix a failing new
 image forward.
 
 ---
@@ -85,7 +97,7 @@ The runner reads ADAS's feed unfiltered and caches a disabled pipeline as **stop
 recurring fire is cancelled, and its queued chunks, group items and writes are held until it is re-enabled, where
 they used to be dropped (chunks, whose rows were then never re-read) or archived to the DLQ (writes). A write ADAS
 refuses with `409 pipeline_conflict` because the stop reached ADAS first is held the same way, and no longer counts
-against the circuit breaker. This relies on ADAS 0.4 leaving `generation` alone on a patch that only changes
+against the circuit breaker. This relies on ADAS 0.23.0 leaving `generation` alone on a patch that only changes
 `enabled`; against an older ADAS, held work is dropped as stale on restart, as before. New gauge:
 `runner.pipelines.stopped`; `runner.pipelines.cached` now includes stopped pipelines.
 
@@ -121,7 +133,7 @@ validly signed JWT for the wrong audience is now logged at DEBUG instead of WARN
 
 ### ADAS's relayout holds writers for a few minutes
 
-ADAS 0.4 waits a fixed 10 minutes after it is Ready, then relays out each existing row-grain enrichment, one
+ADAS 0.23.0 waits a fixed 10 minutes after it is Ready, then relays out each existing row-grain enrichment, one
 at a time. While a table's writers are held — ADAS's `PIPELINE_BUDGET_TIMEOUT` (default `120s`) plus a short
 margin, so a few minutes per table — materialize and row writes to it answer `503 table_relayout_in_progress`.
 The runner treats a `503` as transient and retries from its committed cursor, so this shows as a few failed
@@ -133,7 +145,7 @@ Class-1 ticks (WARN lines and `runner.class1.tick.failures` increments) per tabl
 
 | What happened | Result |
 |---|---|
-| Runner deployed first, old runner already at 0 | Harmless. The new pod never becomes Ready and holds its work until ADAS 0.4 is up. |
+| Runner deployed first, old runner already at 0 | Harmless. The new pod never becomes Ready and holds its work until ADAS 0.23.0 is up. |
 | ADAS deployed without scaling the 0.3 runner to 0 | The 0.3 runner stalls: it starts no new work, logs `ADAS is incompatible with this build's contract version`, and `runner.adas.contract.compatible` reads `0`. A call already under way may be paid for; its write is held and lands after the upgrade. Deploy the runner. |
 
 The contract check (`Adas-Contract-Version: 4`, echoed back by ADAS) runs before a response is read, so
