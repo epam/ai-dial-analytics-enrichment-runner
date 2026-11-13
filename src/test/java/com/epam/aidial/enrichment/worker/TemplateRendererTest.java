@@ -214,4 +214,28 @@ class TemplateRendererTest {
                 .isInstanceOf(UnresolvedPlaceholderException.class)
                 .hasMessageContaining("members:yaml");
     }
+
+    // --- whitespace inside the braces, as ADAS's placeholder rule admits it ------------------------------------
+
+    @Test
+    void whitespaceInsideTheBracesNamesTheSameVariable() {
+        String out = renderer.render("{\"content\":\"{{ prompt }}\", \"n\": {{\tcount }}}",
+                Map.of("prompt", "hello", "count", 7));
+
+        assertThat(parse(out)).containsEntry("content", "hello").containsEntry("n", 7);
+    }
+
+    @Test
+    void whitespaceAroundJsonSuffixedPlaceholderRendersItRaw() {
+        String out = renderer.render("{\"members\": {{ members:json }}}", Map.of("members", List.of("a", "b")));
+
+        assertThat(parse(out).get("members")).isEqualTo(List.of("a", "b"));
+    }
+
+    @Test
+    void anUnboundPlaceholderWithWhitespaceIsReportedByItsTrimmedName() {
+        assertThatThrownBy(() -> renderer.render("{\"x\": {{ missing:json }}}", Map.of()))
+                .isInstanceOf(UnresolvedPlaceholderException.class)
+                .hasMessageEndingWith("work: missing");
+    }
 }

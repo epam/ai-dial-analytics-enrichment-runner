@@ -206,7 +206,8 @@ public class GroupWorkerService {
             if (RetryableStatus.isRetryable(e)) {
                 throw new TransientChunkException(DlqStage.DIAL_CALL, e);
             }
-            spendService.record(payload.getPipelineName(), payload.getPipelineGeneration(), 0, true);
+            spendService.record(payload.getPipelineName(), payload.getPipelineGeneration(), 0,
+                    transformInvoker.usageUnit(transform), true);
             deadLetter(payload, new PoisonGroupException(DlqStage.DIAL_CALL, e.getMessage(),
                     e.getResponseBodyAsString()), true);
             return;

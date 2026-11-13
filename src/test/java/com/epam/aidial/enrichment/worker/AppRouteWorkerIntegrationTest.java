@@ -4,6 +4,7 @@ import com.epam.aidial.enrichment.adas.dto.OutputDto;
 import com.epam.aidial.enrichment.adas.dto.PipelineDto;
 import com.epam.aidial.enrichment.exception.TransientChunkException;
 import com.epam.aidial.enrichment.integration.PostgresContainerSupport;
+import com.epam.aidial.enrichment.spend.SpendPauseGate;
 import com.epam.aidial.enrichment.support.AdasWireMock;
 import com.epam.aidial.enrichment.support.TestPipelines;
 import com.epam.aidial.enrichment.support.UpsertDrain;
@@ -37,7 +38,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * The row lane calling a DIAL application route ({@code transform.preset: dial_app_route}): the call's path, body
  * and missing chat members, the output assembled from the reply by name or by each output's {@code source}, an
- * absent optional field written as NULL, the refusals that dead-letter at {@code validate} after one call, status classification, spend counted in calls, and the route's own
+ * absent optional field written as NULL, the refusals that dead-letter at {@code validate} after one call, status classification, spend counted in calls
+ * (a refused call's too) and bounded by the calls budget, and the route's own
  * read timeout. DIAL and ADAS are stubbed on one WireMock server; PostgreSQL runs in Testcontainers.
  */
 @SpringBootTest
@@ -49,6 +51,7 @@ class AppRouteWorkerIntegrationTest {
     private static final String CHAT_PATH = "/openai/deployments/gpt-4o/chat/completions";
     private static final String ROWS_PATH = "/v1/pipelines/" + PIPELINE_NAME + "/rows";
     private static final int ROUTE_READ_TIMEOUT_MS = 700;
+    private static final int CALL_BUDGET = 2;
 
     @Autowired
     private WorkerService workerService;
@@ -67,6 +70,9 @@ class AppRouteWorkerIntegrationTest {
 
     @Autowired
     private UpsertService upsertService;
+
+    @Autowired
+    private SpendPauseGate spendPauseGate;
 
     @BeforeAll
     static void startBackend() {
@@ -92,6 +98,11 @@ class AppRouteWorkerIntegrationTest {
         registry.add("dial.base-url", BACKEND::baseUrl);
         registry.add("dial.route-read-timeout-ms", () -> Integer.toString(ROUTE_READ_TIMEOUT_MS));
         registry.add("db-scheduler.auto-start", () -> "false");
+        // A calls budget the budget test reaches, and a tokens budget a route pipeline would trip at its first
+        // token: no test here runs a scan, so only the gate's own verdict reads them.
+        registry.add("spend.pause.enabled", () -> "true");
+        registry.add("spend.budget.daily-calls", () -> Integer.toString(CALL_BUDGET));
+        registry.add("spend.budget.daily-tokens", () -> "1");
         registry.add("adas.pipelines.initial-delay-ms", () -> "3600000");
         registry.add("adas.pipelines.poll-interval-ms", () -> "3600000");
     }
@@ -215,6 +226,38 @@ class AppRouteWorkerIntegrationTest {
         assertThat(((Number) totals.get("calls")).longValue()).isEqualTo(2);
         assertThat(((Number) totals.get("usage")).longValue()).isZero();
         assertThat(totals.get("unit")).isEqualTo("calls");
+    }
+
+    /**
+     * The counter row keeps the unit of its first record of the day, so a refused first call charged in tokens would
+     * label every later route call of the day as tokens.
+     */
+    @Test
+    void refusedFirstCallOfTheDayIsRecordedInCalls() {
+        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, routePipeline(null)));
+        BACKEND.stubFor(post(urlPathEqualTo(ROUTE_PATH)).willReturn(aResponse().withStatus(400)));
+
+        process();
+
+        Map<String, Object> row = jdbcTemplate.queryForMap(
+                "SELECT calls, failures, usage_unit FROM spend_counter WHERE pipeline_name = ?", PIPELINE_NAME);
+        assertThat(((Number) row.get("calls")).longValue()).isZero();
+        assertThat(((Number) row.get("failures")).longValue()).isEqualTo(1);
+        assertThat(row.get("usage_unit")).isEqualTo("calls");
+    }
+
+    @Test
+    void callsBudgetPausesRoutePipeline() {
+        PipelineDto pipeline = routePipeline(null);
+        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, pipeline));
+        BACKEND.stubFor(post(urlPathEqualTo(ROUTE_PATH)).willReturn(okJson("{\"label\":\"positive\"}")));
+
+        process();
+        // Under the calls budget, and the one-token budget never trips: a route call accrues no tokens.
+        assertThat(spendPauseGate.isOverBudget(pipeline)).isFalse();
+
+        process();
+        assertThat(spendPauseGate.isOverBudget(pipeline)).isTrue();
     }
 
     @Test

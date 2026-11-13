@@ -18,6 +18,12 @@ interface DialCall {
     /** The preset this call serves. */
     TransformPreset preset();
 
+    /**
+     * The unit this preset's usage is recorded in ({@code tokens} or {@code calls}). Every spend record of the call
+     * carries it, a failed call's too: the counter row keeps the unit of its first record of the day.
+     */
+    String usageUnit();
+
     /** The request body: the rendered template with whatever this preset adds to it. */
     String body(String renderedTemplate, TransformDto transform, Map<String, Object> responseSchema);
 
@@ -30,7 +36,7 @@ interface DialCall {
      * @throws com.epam.aidial.enrichment.exception.ResponseValidationException when the reply cannot yield an output
      *     at all, carrying the raw reply, so the unit is dead-lettered at {@code validate} without a second call
      */
-    Reply read(PipelineDto pipeline, TransformDto transform, String raw);
+    Reply read(PipelineDto pipeline, String raw);
 
     /** Whether a schema mismatch may be repaired by re-asking with a corrective message. */
     boolean repairs();
@@ -41,11 +47,10 @@ interface DialCall {
     /**
      * What one call produced.
      *
-     * @param output     the output as JSON text, validated against the response schema; null when the reply had none
-     * @param evidence   what a dead-letter item carries when the output fails validation
-     * @param usage      the usage amount recorded in the spend counter
-     * @param usageUnit  the unit of {@code usage}
+     * @param output    the output as JSON text, validated against the response schema; null when the reply had none
+     * @param evidence  what a dead-letter item carries when the output fails validation
+     * @param usage     the usage amount recorded in the spend counter, in {@link DialCall#usageUnit()}
      */
-    record Reply(String output, String evidence, long usage, String usageUnit) {
+    record Reply(String output, String evidence, long usage) {
     }
 }

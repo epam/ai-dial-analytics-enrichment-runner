@@ -97,6 +97,13 @@ The constant is raised in `AdasContract`, and `FeedShapeTest` / `TestPipelines` 
   straight to the DLQ, which is requeueable.
 - **Skewed deploy.**
   → The echo check stalls the runner with no calls made. Deploy both halves together.
+- **A route read timeout re-calls rows that already succeeded.** A `ResourceAccessException` is transient and
+  retries the whole chunk, so every row of it calls the route again, and each call is paid.
+  → `rows_per_call` bounds the repeat; a route expected to run near its timeout wants a small chunk.
+- **A shutdown can abandon a paid call.** The graceful-shutdown phase (`SHUTDOWN_TIMEOUT`, `30s` by default) is
+  shorter than the `180s` route read timeout, so a route call still in flight at shutdown is cut off, charged by
+  the application, and made again when its chunk retries.
+  → Raise `SHUTDOWN_TIMEOUT` (and the pod's termination grace period) where long route calls are common.
 
 ## Migration Plan
 

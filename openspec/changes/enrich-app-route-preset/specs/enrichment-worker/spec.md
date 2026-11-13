@@ -14,14 +14,17 @@ on `transform.preset`:
   `response_format`. It is POSTed to `/v1/deployments/{model}/route/{route}` with no `api-version`, and the
   output is assembled from the parsed response body by the outputs' `source` expressions (see "A route
   output's value is read from the response by its source before validation"). There is no chat envelope to
-  unwrap. The route is appended segment by segment, each segment percent-encoded as a path
+  unwrap. The deployment id is encoded as one path segment, as on the chat call, and the route is appended segment by segment, each segment percent-encoded as a path
   segment, so no character of it can change the URL's structure. `response_format` and `api-version` are
   parts of the chat-completions contract that an application route does not take part in, so sending
   them would only hand the route members it did not ask for.
 
 Everything else on the call SHALL be the same under both presets: rate-limiter acquisition, the DIAL span,
 the timer, and the retryable-vs-permanent classification of a failed status. The DIAL span SHALL carry the
-preset as an attribute. A
+preset as an attribute, and the DIAL call meters (`runner.dial.latency`, `runner.dial.calls`,
+`runner.dial.rate.limited`) SHALL carry it as a `preset` tag, `chat_completion` or `dial_app_route`, so a route
+call that may run for minutes and a chat call that runs for seconds are never blended into one latency. The tag
+has exactly those two values, and both series exist from startup. A
 variable whose value is a collection SHALL render as a JSON array, so a group's member list can be
 interpolated; a scalar SHALL render as it does today. The render → call → validate → map pipeline SHALL be
 shared by both grains rather than reimplemented per grain, so the rate-limiter acquisition, spend accounting
@@ -31,6 +34,12 @@ The `response_schema` read here is the **derived top-level** member of the compi
 resolved schema, whether ADAS stored one on the declaration or composed it from the outputs — and SHALL NOT
 be read from inside the authored `transform` block, where a member of the same name means only "the schema
 as authored".
+
+#### Scenario: The DIAL meters are tagged by preset
+
+- **WHEN** one route call succeeds
+- **THEN** the `runner.dial.latency` timer and the `runner.dial.calls{outcome=success}` counter tagged
+  `preset=dial_app_route` each count one more, and the series tagged `preset=chat_completion` do not move
 
 #### Scenario: A row is rendered and sent to DIAL
 
@@ -164,6 +173,10 @@ The suffix SHALL be exactly `:json`, immediately after the name. The unbound-pla
 to the name before it, and an unbound `{{name:json}}` SHALL fail the work item exactly as an unbound
 `{{name}}` does. Substitution SHALL stay single-pass over the template.
 
+Whitespace between the braces and the placeholder's text SHALL be ignored, in both forms and in the unbound
+check alike: `{{ name }}` names `name`, and `{{ name:json }}` is the raw form of `name`. This is the grammar
+ADAS's placeholder rule admits, so a template ADAS accepts SHALL NOT fail every unit here as unbound.
+
 A placeholder carrying another suffix is refused by ADAS when the pipeline is armed. If one reaches the
 runner anyway, its whole text SHALL be treated as an unbound name, failing the work item rather than
 rendering through.
@@ -179,6 +192,13 @@ rendering through.
 - **GIVEN** a row template `{"note": {{note:json}}}` whose `note` is bound to null
 - **WHEN** it is rendered
 - **THEN** the body is `{"note": null}`
+
+#### Scenario: Whitespace inside the braces is ignored
+
+- **GIVEN** a group template `{"members": {{ members:json }}}` and two assembled members
+- **WHEN** it is rendered
+- **THEN** the body is a JSON object whose `members` member is an array of two objects, and no unbound
+  placeholder is reported
 
 #### Scenario: An unbound raw placeholder fails the work item
 

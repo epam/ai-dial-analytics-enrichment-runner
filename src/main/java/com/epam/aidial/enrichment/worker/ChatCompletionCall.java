@@ -35,6 +35,11 @@ class ChatCompletionCall implements DialCall {
     }
 
     @Override
+    public String usageUnit() {
+        return SpendService.TOKENS_UNIT;
+    }
+
+    @Override
     public String body(String renderedTemplate, TransformDto transform, Map<String, Object> responseSchema) {
         return requestBuilder.build(renderedTemplate, transform.params(), responseSchema);
     }
@@ -45,10 +50,10 @@ class ChatCompletionCall implements DialCall {
     }
 
     @Override
-    public Reply read(PipelineDto pipeline, TransformDto transform, String raw) {
+    public Reply read(PipelineDto pipeline, String raw) {
         ChatResponse response = parse(pipeline, raw);
         String content = response != null ? response.firstContent() : null;
-        return new Reply(content, content, tokens(response), SpendService.TOKENS_UNIT);
+        return new Reply(content, content, tokens(response));
     }
 
     @Override

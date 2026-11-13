@@ -16,6 +16,7 @@ import com.epam.aidial.enrichment.exception.OutputMappingException;
 import com.epam.aidial.enrichment.exception.PipelineStoppedHoldException;
 import com.epam.aidial.enrichment.exception.TransientChunkException;
 import com.epam.aidial.enrichment.exception.UnresolvedPlaceholderException;
+import com.epam.aidial.enrichment.expression.JsonataEvaluator;
 import com.epam.aidial.enrichment.observability.RunnerMetrics;
 import com.epam.aidial.enrichment.observability.RunnerTracer;
 import com.epam.aidial.enrichment.persistence.DlqItemEntity;
@@ -87,7 +88,8 @@ class WorkerServiceTest {
     // render -> DIAL -> validate -> map pipeline through WorkerService. Mocking the invoker instead would
     // make these tests pass without the extracted code running at all.
     private final TransformInvoker transformInvoker = new TransformInvoker(
-            List.of(new ChatCompletionCall(dialClient, requestBuilder, jsonMapper)), dialRateLimiter,
+            List.of(new ChatCompletionCall(dialClient, requestBuilder, jsonMapper),
+                    new AppRouteCall(dialClient, requestBuilder, mock(JsonataEvaluator.class), jsonMapper)), dialRateLimiter,
             templateRenderer, responseValidator, outputMapper, spendService, runnerMetrics,
             runnerTracer, workerProperties, jsonMapper);
 
@@ -358,7 +360,7 @@ class WorkerServiceTest {
         assertThatCode(() -> worker.process("chunk-2", payload))
                 .isInstanceOf(TransientChunkException.class);
         verify(dlqItemWriter, never()).upsertAll(any());
-        verify(spendService, never()).record(anyString(), anyInt(), anyLong(), eq(true));
+        verify(spendService, never()).record(anyString(), anyLong(), anyLong(), anyString(), eq(true));
     }
 
     @Test

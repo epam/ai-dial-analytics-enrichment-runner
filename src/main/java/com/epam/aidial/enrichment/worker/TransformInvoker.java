@@ -11,22 +11,23 @@ import com.epam.aidial.enrichment.exception.TransientChunkException;
 import com.epam.aidial.enrichment.observability.RunnerMetrics;
 import com.epam.aidial.enrichment.observability.RunnerTracer;
 import com.epam.aidial.enrichment.spend.SpendService;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClientResponseException;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 /**
  * Derives a transform's output columns from a set of input variables: render the request template, build
- * the DIAL request for the transform's preset (see {@link DialCall}), call the deployment, validate the response against the entry's resolved schema with a
- * bounded repair retry, and map the result to physical enrichment columns.
+ * the DIAL request for the transform's preset (see {@link DialCall}), call the deployment, validate the response
+ * against the entry's resolved schema, and map the result to physical enrichment columns. Whether a schema mismatch
+ * gets a bounded repair retry depends on the preset: a chat completion is re-asked with a corrective message, an
+ * application route is not (see {@link DialCall#repairs()}).
  *
  * <p><strong>The schema comes from the entry, the request from the transform.</strong> The transform block
  * carries what the call is made <em>of</em> — model, preset, params, template — while the schema the model
@@ -46,10 +47,9 @@ import java.util.Map;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class TransformInvoker {
 
-    private final List<DialCall> calls;
+    private final Map<TransformPreset, DialCall> calls;
     private final DialRateLimiter dialRateLimiter;
     private final TemplateRenderer templateRenderer;
     private final ResponseValidator responseValidator;
@@ -59,6 +59,49 @@ public class TransformInvoker {
     private final RunnerTracer runnerTracer;
     private final WorkerProperties workerProperties;
     private final JsonMapper jsonMapper;
+
+    /**
+     * Indexes the calls by preset, failing at startup when a preset has no call or two: a gap would otherwise
+     * surface only when the first pipeline of that preset is evaluated, and a duplicate would pick one silently.
+     */
+    public TransformInvoker(List<DialCall> calls, DialRateLimiter dialRateLimiter, TemplateRenderer templateRenderer,
+                            ResponseValidator responseValidator, OutputMapper outputMapper, SpendService spendService,
+                            RunnerMetrics runnerMetrics, RunnerTracer runnerTracer, WorkerProperties workerProperties,
+                            JsonMapper jsonMapper) {
+        this.calls = index(calls);
+        this.dialRateLimiter = dialRateLimiter;
+        this.templateRenderer = templateRenderer;
+        this.responseValidator = responseValidator;
+        this.outputMapper = outputMapper;
+        this.spendService = spendService;
+        this.runnerMetrics = runnerMetrics;
+        this.runnerTracer = runnerTracer;
+        this.workerProperties = workerProperties;
+        this.jsonMapper = jsonMapper;
+    }
+
+    private static Map<TransformPreset, DialCall> index(List<DialCall> calls) {
+        Map<TransformPreset, DialCall> byPreset = new EnumMap<>(TransformPreset.class);
+        for (DialCall call : calls) {
+            if (byPreset.putIfAbsent(call.preset(), call) != null) {
+                throw new IllegalStateException("two DIAL calls implement preset " + call.preset());
+            }
+        }
+        for (TransformPreset preset : TransformPreset.values()) {
+            if (!byPreset.containsKey(preset)) {
+                throw new IllegalStateException("no DIAL call implements preset " + preset);
+            }
+        }
+        return byPreset;
+    }
+
+    /**
+     * The unit a transform's calls are recorded in, so a lane recording a failed call charges it in the same unit as
+     * a successful one.
+     */
+    public String usageUnit(TransformDto transform) {
+        return callFor(transform).usageUnit();
+    }
 
     /**
      * Renders, calls, validates and output-maps one evaluation.
@@ -77,11 +120,7 @@ public class TransformInvoker {
 
     /** The call for the transform's preset; an absent preset is a chat completion, as ADAS defaults it. */
     private DialCall callFor(TransformDto transform) {
-        TransformPreset preset = transform.preset() == null ? TransformPreset.CHAT_COMPLETION : transform.preset();
-        return calls.stream()
-                .filter(call -> call.preset() == preset)
-                .findFirst()
-                .orElseThrow(() -> new IllegalStateException("no DIAL call implements preset " + preset));
+        return calls.get(transform.preset() == null ? TransformPreset.CHAT_COMPLETION : transform.preset());
     }
 
     private String callWithRepair(DialCall call, PipelineDto pipeline, TransformDto transform, String requestBody) {
@@ -108,30 +147,31 @@ public class TransformInvoker {
         if (!dialRateLimiter.acquire(pipeline.name(), pipeline.rateRpm())) {
             throw new TransientChunkException(DlqStage.DIAL_CALL, "rate limited for pipeline " + pipeline.name(), null);
         }
+        TransformPreset preset = call.preset();
         var sample = runnerMetrics.startDialTimer();
         String raw;
         try {
             raw = runnerTracer.inSpan("enrichment.dial-call", dialSpanAttributes(pipeline, transform, call),
                     () -> call.call(transform, requestBody));
         } catch (RuntimeException e) {
-            runnerMetrics.recordDialError(sample);
+            runnerMetrics.recordDialError(preset, sample);
             if (e instanceof RestClientResponseException http && http.getStatusCode().value() == 429) {
                 // Also counted as an error above: rate-limit pressure needs telling apart from model failure,
                 // but a 429 is still a failed call and dropping it would make the error rate under-report.
-                runnerMetrics.recordDialRateLimited();
+                runnerMetrics.recordDialRateLimited(preset);
             }
             throw e;
         }
-        runnerMetrics.recordDialSuccess(sample);
+        runnerMetrics.recordDialSuccess(preset, sample);
         DialCall.Reply reply;
         try {
-            reply = call.read(pipeline, transform, raw);
+            reply = call.read(pipeline, raw);
         } catch (ResponseValidationException unreadable) {
             // The call succeeded and is counted; only its reply yielded nothing to validate.
-            spendService.record(pipeline.name(), pipeline.generation(), 0, SpendService.CALLS_UNIT, false);
+            spendService.record(pipeline.name(), pipeline.generation(), 0, call.usageUnit(), false);
             throw unreadable;
         }
-        spendService.record(pipeline.name(), pipeline.generation(), reply.usage(), reply.usageUnit(), false);
+        spendService.record(pipeline.name(), pipeline.generation(), reply.usage(), call.usageUnit(), false);
         return reply;
     }
 
@@ -140,7 +180,7 @@ public class TransformInvoker {
         attributes.put("pipeline.name", pipeline.name());
         attributes.put("pipeline.generation", Long.toString(pipeline.generation()));
         attributes.put("model", transform.model());
-        attributes.put("preset", call.preset().name().toLowerCase(Locale.ROOT));
+        attributes.put("preset", RunnerMetrics.presetTag(call.preset()));
         putIfPresent(attributes, "chunk.id", MDC.get(WorkerMdc.CHUNK_ID));
         putIfPresent(attributes, "grain.key", MDC.get(WorkerMdc.GRAIN_KEY));
         putIfPresent(attributes, "group.key", MDC.get(WorkerMdc.GROUP_KEY));

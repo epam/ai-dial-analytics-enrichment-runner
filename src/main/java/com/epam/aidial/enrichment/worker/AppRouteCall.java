@@ -12,7 +12,6 @@ import com.epam.aidial.enrichment.spend.SpendService;
 import lombok.RequiredArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
-import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.util.LinkedHashMap;
@@ -33,10 +32,8 @@ import java.util.Map;
 @RequiredArgsConstructor
 class AppRouteCall implements DialCall {
 
-    private static final TypeReference<LinkedHashMap<String, Object>> OBJECT = new TypeReference<>() {
-    };
-
     private final DialClient dialClient;
+    private final DialRequestBuilder requestBuilder;
     private final JsonataEvaluator jsonata;
     private final JsonMapper jsonMapper;
 
@@ -46,12 +43,14 @@ class AppRouteCall implements DialCall {
     }
 
     @Override
+    public String usageUnit() {
+        return SpendService.CALLS_UNIT;
+    }
+
+    /** The rendered body plus {@code params}; the schema is not sent, since a route takes no {@code response_format}. */
+    @Override
     public String body(String renderedTemplate, TransformDto transform, Map<String, Object> responseSchema) {
-        Map<String, Object> body = jsonMapper.readValue(renderedTemplate, OBJECT);
-        if (transform.params() != null) {
-            body.putAll(transform.params());
-        }
-        return jsonMapper.writeValueAsString(body);
+        return requestBuilder.build(renderedTemplate, transform.params(), null);
     }
 
     @Override
@@ -66,7 +65,7 @@ class AppRouteCall implements DialCall {
      * validated, so members of the body no output reads never reach validation.
      */
     @Override
-    public Reply read(PipelineDto pipeline, TransformDto transform, String raw) {
+    public Reply read(PipelineDto pipeline, String raw) {
         Object parsed;
         try {
             parsed = jsonMapper.readValue(raw, Object.class);
@@ -83,7 +82,7 @@ class AppRouteCall implements DialCall {
                 output.put(declared.name(), value);
             }
         }
-        return new Reply(jsonMapper.writeValueAsString(output), raw, 0, SpendService.CALLS_UNIT);
+        return new Reply(jsonMapper.writeValueAsString(output), raw, 0);
     }
 
     private Object valueOf(OutputDto declared, Map<?, ?> body, Object parsed, String raw) {

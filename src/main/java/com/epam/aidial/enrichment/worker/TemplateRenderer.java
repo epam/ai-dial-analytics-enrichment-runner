@@ -49,10 +49,12 @@ import java.util.regex.Pattern;
 public class TemplateRenderer {
 
     /**
-     * One placeholder, matched non-greedily and without crossing a brace. {@link #render} substitutes on an
-     * exact {@code "{{" + key + "}}"} match, so the name this captures is the name the substitution needs —
-     * no trimming, no whitespace tolerance, and no second grammar that could accept what substitution will
-     * not.
+     * One placeholder, matched non-greedily and without crossing a brace. The captured token is stripped of
+     * surrounding whitespace before its suffix and name are read, so {@code {{ members }}} and
+     * {@code {{ members:json }}} name {@code members}, as ADAS's placeholder rule reads them. The grammar matches
+     * ADAS's: a template ADAS admits binds the same names here, rather than passing admission and then failing
+     * every unit as unbound. Binding and substitution read the token through the same {@link #nameOf}, so there
+     * is no second grammar that could accept what substitution will not.
      */
     private static final Pattern PLACEHOLDER = Pattern.compile("\\{\\{([^{}]*)}}");
 
@@ -83,7 +85,7 @@ public class TemplateRenderer {
         while (matcher.find()) {
             // containsKey holds for every match the assertion above let through; the branch is what keeps
             // that true rather than assumed, and leaves an unbound name as written rather than as "null".
-            String token = matcher.group(1);
+            String token = matcher.group(1).strip();
             boolean raw = isRaw(token);
             String name = nameOf(token);
             String replacement = !inputs.containsKey(name) ? matcher.group()
@@ -109,7 +111,7 @@ public class TemplateRenderer {
         Set<String> unresolved = new LinkedHashSet<>();
         Matcher matcher = PLACEHOLDER.matcher(template);
         while (matcher.find()) {
-            String name = nameOf(matcher.group(1));
+            String name = nameOf(matcher.group(1).strip());
             if (!inputs.containsKey(name)) {
                 unresolved.add(name);
             }
