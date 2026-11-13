@@ -11,7 +11,7 @@ import org.springframework.web.client.RestClient;
 import java.time.Duration;
 
 /**
- * Builds the {@link RestClient} used for DIAL Core chat/completions calls: the DIAL base URL,
+ * Builds the {@link RestClient}s used for DIAL Core calls, chat/completions and application routes alike: the DIAL base URL,
  * connect/read timeouts, and the {@code Api-Key} header. Response bodies are parsed by the caller
  * with the application Jackson 3 {@code JsonMapper}. Every call is timed and logged by
  * {@link DialCallTimingInterceptor}.
@@ -20,18 +20,34 @@ import java.time.Duration;
 public class DialClientConfiguration {
 
     public static final String DIAL_REST_CLIENT = "dialRestClient";
+    public static final String DIAL_ROUTE_REST_CLIENT = "dialRouteRestClient";
     public static final String API_KEY_HEADER = "Api-Key";
 
     @Bean(DIAL_REST_CLIENT)
     public RestClient dialRestClient(DialProperties properties) {
+        return build(properties, properties.readTimeoutMs(), new DialCallTimingInterceptor(properties));
+    }
+
+    /**
+     * The client for application-route calls. Identical to {@link #dialRestClient} except for its read timeout: an
+     * application makes model calls of its own per request, and raising the shared timeout instead would loosen
+     * hang detection for every chat call too.
+     */
+    @Bean(DIAL_ROUTE_REST_CLIENT)
+    public RestClient dialRouteRestClient(DialProperties properties) {
+        return build(properties, properties.routeReadTimeoutMs(), new DialCallTimingInterceptor(
+                DialCallTimingInterceptor.ROUTE_READ_TIMEOUT_PROPERTY, properties.routeReadTimeoutMs()));
+    }
+
+    private static RestClient build(DialProperties properties, int readTimeoutMs, DialCallTimingInterceptor timing) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofMillis(properties.connectTimeoutMs()));
-        factory.setReadTimeout(Duration.ofMillis(properties.readTimeoutMs()));
+        factory.setReadTimeout(Duration.ofMillis(readTimeoutMs));
 
         RestClient.Builder builder = RestClient.builder()
                 .baseUrl(Strings.CS.removeEnd(properties.baseUrl(), "/"))
                 .requestFactory(factory)
-                .requestInterceptor(new DialCallTimingInterceptor(properties));
+                .requestInterceptor(timing);
         if (StringUtils.isNotBlank(properties.apiKey())) {
             builder = builder.defaultHeader(API_KEY_HEADER, properties.apiKey());
         }

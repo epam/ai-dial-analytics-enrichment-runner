@@ -25,11 +25,17 @@ import java.io.IOException;
 public class DialCallTimingInterceptor implements ClientHttpRequestInterceptor {
 
     public static final String READ_TIMEOUT_PROPERTY = "dial.read-timeout-ms";
+    public static final String ROUTE_READ_TIMEOUT_PROPERTY = "dial.route-read-timeout-ms";
 
     private final CallTimingLog timing;
 
     public DialCallTimingInterceptor(DialProperties properties) {
-        this.timing = new CallTimingLog(log, "DIAL", READ_TIMEOUT_PROPERTY, properties.readTimeoutMs());
+        this(READ_TIMEOUT_PROPERTY, properties.readTimeoutMs());
+    }
+
+    /** For a client whose read timeout is another property, so the WARN threshold and its message name that one. */
+    public DialCallTimingInterceptor(String readTimeoutProperty, int readTimeoutMs) {
+        this.timing = new CallTimingLog(log, "DIAL", readTimeoutProperty, readTimeoutMs);
     }
 
     @Override

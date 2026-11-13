@@ -13,7 +13,7 @@ class DialRateLimiterTest {
     @Test
     void permitsUpToRpmThenRefusesWithinTheWindow() {
         DialProperties properties =
-                new DialProperties("http://dial", "", "2025-01-01-preview", 5000, 60000, 2, Duration.ZERO);
+                new DialProperties("http://dial", "", "2025-01-01-preview", 5000, 60000, 2, Duration.ZERO, 180000);
         DialRateLimiter limiter = new DialRateLimiter(RateLimiterRegistry.ofDefaults(), properties);
 
         assertThat(limiter.acquire("r1", 2)).isTrue();
@@ -24,7 +24,7 @@ class DialRateLimiterTest {
     @Test
     void differentPipelinesHaveIndependentBudgets() {
         DialProperties properties =
-                new DialProperties("http://dial", "", "2025-01-01-preview", 5000, 60000, 1, Duration.ZERO);
+                new DialProperties("http://dial", "", "2025-01-01-preview", 5000, 60000, 1, Duration.ZERO, 180000);
         DialRateLimiter limiter = new DialRateLimiter(RateLimiterRegistry.ofDefaults(), properties);
 
         assertThat(limiter.acquire("r1", 1)).isTrue();

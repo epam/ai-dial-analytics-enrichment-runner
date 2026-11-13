@@ -107,6 +107,41 @@ class FeedShapeTest {
               "updated_at":"2026-09-18T00:00:00Z"
             }]}""";
 
+    /**
+     * An {@code llm} entry calling an application route. Two members exist only on this preset: {@code transform.route}
+     * and an output's {@code source}, which reads the value out of the route's body. One output declares a
+     * {@code source} and one does not, so the test asserts both the member binding and its absence.
+     */
+    private static final String ROUTE_ENTRY = """
+            {"pipelines":[{
+              "name":"insights-route",
+              "kind":"enrich",
+              "target":"enr_insights",
+              "inputs":["dial_usage_log"],
+              "transform":{
+                "type":"llm",
+                "preset":"dial_app_route",
+                "model":"insights-app",
+                "route":"v1/insights",
+                "params":{"mode":"fast"},
+                "request_template":"{\\"text\\": {{prompt:json}}}",
+                "inputs":{"prompt":{"column":"request_body"}},
+                "outputs":{"label":{"prose":"the label"},"score":{"prose":"the score"}}
+              },
+              "response_schema":{"type":"object","additionalProperties":false,
+                "properties":{"label":{"type":"string"},"score":{"type":["number","null"]}},
+                "required":["label"]},
+              "grain_key":"event_id",
+              "version_column":"_ingested_at",
+              "outputs":[{"name":"label","column":"label","jsonata":null,"source":"result.label"},
+                         {"name":"score","column":"score","jsonata":null}],
+              "trigger":{"kind":"schedule","cron":"40 * * * * *"},
+              "enabled":true,
+              "generation":5,
+              "created_at":"2026-09-01T00:00:00Z",
+              "updated_at":"2026-09-18T00:00:00Z"
+            }]}""";
+
     @Test
     void bindsEveryMemberTheRunnerDereferencesOnAnLlmEntry() {
         PipelineDto pipeline = parseOne(LLM_ENTRY);
@@ -135,6 +170,27 @@ class FeedShapeTest {
         assertThat(pipeline.rowsPerCall()).isEqualTo(25);
         assertThat(pipeline.rateRpm()).isEqualTo(60);
         assertThat(pipeline.sampleFraction()).isEqualTo(0.5);
+    }
+
+    @Test
+    void bindsTheRouteAndEachOutputsSourceOnRouteEntry() {
+        PipelineDto pipeline = parseOne(ROUTE_ENTRY);
+
+        assertThat(pipeline.transform().preset()).isEqualTo(TransformPreset.DIAL_APP_ROUTE);
+        assertThat(pipeline.transform().model()).isEqualTo("insights-app");
+        assertThat(pipeline.transform().route()).isEqualTo("v1/insights");
+        assertThat(pipeline.transform().params()).containsEntry("mode", "fast");
+        assertThat(pipeline.outputs()).containsExactly(
+                new OutputDto("label", "label", null, "result.label"),
+                new OutputDto("score", "score", null, null));
+    }
+
+    @Test
+    void chatCompletionEntryCarriesNoRouteAndNoSource() {
+        PipelineDto pipeline = parseOne(LLM_ENTRY);
+
+        assertThat(pipeline.transform().route()).isNull();
+        assertThat(pipeline.outputs()).allSatisfy(output -> assertThat(output.source()).isNull());
     }
 
     /**
