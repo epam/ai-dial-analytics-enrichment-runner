@@ -560,6 +560,12 @@ A runner on 3 would drop the member and have every such write-back refused row b
 was paid for; the bump turns that into one refusal of the whole build by the same echo check, and nothing
 else is added for it.
 
+**Adding the `dial_app_route` transform preset raises it to 5**, on both sides in the same window. Under
+contract 5 an entry's `transform.preset` may be `dial_app_route` and its `transform` may carry `route`. A
+runner on 4 cannot decode the preset. Without the bump it would fail on those entries one at a time, or,
+reading an unknown preset as the default, call a route application's chat-completions endpoint. The echo
+check refuses the build as a whole instead, and nothing else is added for it.
+
 **No `contract` query parameter SHALL be added to the feed request, and no `contract` member SHALL be
 read from a response body.** Both would duplicate this header. The header already covers the feed and all four data-plane endpoints, and it covers responses a body member
 cannot reach — a `401`, a `403`, an unmapped-path `404` — which is the distinction that makes an absent
@@ -628,6 +634,12 @@ without meaning skew, and neither SHALL produce a verdict or change the recorded
 - **WHEN** an ADAS call returns 502 with no `Adas-Contract-Version` header
 - **THEN** the call fails as a server error and the compatibility state stays compatible
 
+#### Scenario: A runner on 5 refuses an ADAS on 4
+
+- **GIVEN** an ADAS echoing contract `4`
+- **WHEN** a runner built on contract `5` polls the feed
+- **THEN** the response is classified incompatible and no pipeline is admitted from it
+
 ### Requirement: An incompatible ADAS stalls the runner instead of steering it
 
 On an incompatible response the runner SHALL keep its current cache and its recurring tasks, SHALL NOT
@@ -675,8 +687,14 @@ reported through the metric and the log, not by withdrawing the pod.
 
 ### Requirement: Admission refuses a pipeline missing any field its lane dereferences
 
-The admission gate SHALL refuse a feed entry that carries **no `transform`**, and one whose
-**`grain_key` is blank**, naming each as its reason. Neither is a routable pipeline: the lane is chosen
+The admission gate SHALL refuse a feed entry that carries **no `transform`**, one whose
+**`grain_key` is blank**, and one whose `transform.preset` is `dial_app_route` with a `route` that is
+**absent or outside the route grammar**, naming each as its reason. Under that grammar a route is 1–256
+characters of `/`-separated `[A-Za-z0-9._~-]+` segments, with no `.` or `..` segment, no leading or
+trailing `/`, and no `?`, `#` or `%`. ADAS refuses the same shapes at declaration. The runner checks them
+again because the route becomes part of a URL it sends with its own credentials, and a remote invariant
+is not a safe guard for that. An entry with an output whose `source` does not compile SHALL also be
+refused, naming that output, rather than failing on every call. Neither is a routable pipeline: the lane is chosen
 from `transform.type`, and the row and group lanes both read the grain or group column out of every
 scanned row by that key.
 
@@ -705,6 +723,13 @@ for a local, irreversible loss.
 - **WHEN** the synced set is admitted
 - **THEN** the pipeline is refused with a reason naming the grain key, and the refusal is counted and
   logged once for that generation
+
+#### Scenario: A route entry with a traversing route is refused
+
+- **GIVEN** a feed entry with `preset: dial_app_route` and `route: "../admin"`, or with no `route`
+- **WHEN** the synced set is admitted
+- **THEN** the pipeline is refused with a reason naming the route, is not cached, and no DIAL call is made
+  for it
 
 ### Requirement: Reconciling to empty requires a confirming poll
 
@@ -838,4 +863,3 @@ re-used-name acknowledgement in ADAS covers what that leaves under the name on t
 - **GIVEN** two processes that both read the old `created_at`, one of which has already reset the pipeline
 - **WHEN** the other one runs its reset
 - **THEN** the compare-and-set matches no row, and the new pipeline's cursor, groups and queued work are kept
-
