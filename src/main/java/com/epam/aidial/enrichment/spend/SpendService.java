@@ -26,8 +26,14 @@ import java.time.ZoneOffset;
 @RequiredArgsConstructor
 public class SpendService {
 
-    /** The only usage unit phase-1's chat_completion path records; other presets may add calls/rows. */
+    /** The usage unit a chat-completion call records: the reply's total tokens. */
     public static final String TOKENS_UNIT = "tokens";
+
+    /**
+     * The usage unit an application-route call records, with an amount of zero: the call itself is counted, and an
+     * application's own usage block is not interpreted.
+     */
+    public static final String CALLS_UNIT = "calls";
 
     private static final String UPSERT = """
             INSERT INTO spend_counter (pipeline_name, pipeline_generation, day, calls, usage_amount, usage_unit, failures)

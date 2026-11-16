@@ -21,9 +21,17 @@ package com.epam.aidial.enrichment.adas.dto;
  * @param jsonata transform over the model response, absent when the value is read straight out of
  *                {@code response[name]} — the common case, and the only spelling of "no transform", since
  *                an identity expression is refused at registration
+ * @param source  {@code dial_app_route} only: JSONata over the route's response body that yields the value of
+ *                {@code name} before validation; absent when the value is the response member named {@code name}
  */
 public record OutputDto(
         String name,
         String column,
-        String jsonata) {
+        String jsonata,
+        String source) {
+
+    /** An output with no {@code source}, which is every output of a chat-completion transform. */
+    public OutputDto(String name, String column, String jsonata) {
+        this(name, column, jsonata, null);
+    }
 }

@@ -50,8 +50,10 @@ class DialCallTimingInterceptorTest {
     void setUp() {
         DIAL.resetAll();
         DialProperties properties = new DialProperties(DIAL.baseUrl(), "", "2025-01-01-preview", 1000, READ_TIMEOUT_MS,
-                60, Duration.ZERO);
-        dialClient = new DialClient(new DialClientConfiguration().dialRestClient(properties), properties);
+                60, Duration.ZERO, READ_TIMEOUT_MS);
+        DialClientConfiguration configuration = new DialClientConfiguration();
+        dialClient = new DialClient(configuration.dialRestClient(properties), configuration.dialRouteRestClient(properties),
+                properties);
         appender = CapturingAppender.attachAtTrace();
     }
 

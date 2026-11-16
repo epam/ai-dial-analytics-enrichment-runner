@@ -1,6 +1,7 @@
 package com.epam.aidial.enrichment.observability;
 
 import com.epam.aidial.enrichment.adas.AdasCompatibilityState;
+import com.epam.aidial.enrichment.adas.dto.TransformPreset;
 import com.epam.aidial.enrichment.pause.PipelinePauseRegistry;
 import com.epam.aidial.enrichment.persistence.DlqItemRepository;
 import com.epam.aidial.enrichment.persistence.GroupStateRepository;
@@ -44,6 +45,9 @@ public class RunnerMetrics {
      * backpressure so the number an operator reads and the number the scan gates on cannot diverge.
      */
     private static final List<String> QUEUE_TASKS = WorkTasks.PIPELINE_SCOPED;
+
+    /** The tag naming the preset of a DIAL call on the DIAL meters. */
+    public static final String PRESET_TAG = "preset";
 
     /**
      * The cursor-driven lanes, as a bounded tag for the stall counter. A stall is a property of the cursor
@@ -92,13 +96,13 @@ public class RunnerMetrics {
         }
     }
 
-    private final Timer dialLatency;
-    private final Counter dialSuccess;
-    private final Counter dialError;
+    private final Map<TransformPreset, Timer> dialLatency = new EnumMap<>(TransformPreset.class);
+    private final Map<TransformPreset, Counter> dialSuccess = new EnumMap<>(TransformPreset.class);
+    private final Map<TransformPreset, Counter> dialError = new EnumMap<>(TransformPreset.class);
     private final Counter validationFailures;
     private final Counter rowsUpserted;
     private final Counter class1TickFailures;
-    private final Counter dialRateLimited;
+    private final Map<TransformPreset, Counter> dialRateLimited = new EnumMap<>(TransformPreset.class);
     private final Counter groupsEvaluated;
     private final Counter groupsDeadLettered;
     private final Counter supersededGroupEvaluations;
@@ -191,9 +195,16 @@ public class RunnerMetrics {
                 .register(registry);
         Gauge.builder("runner.group.ceiling.blocked", this, m -> m.groupCeilingBlocked).register(registry);
 
-        this.dialLatency = Timer.builder("runner.dial.latency").register(registry);
-        this.dialSuccess = Counter.builder("runner.dial.calls").tag("outcome", "success").register(registry);
-        this.dialError = Counter.builder("runner.dial.calls").tag("outcome", "error").register(registry);
+        // Tagged by preset, pre-registered for each: a route call may take minutes where a chat call takes seconds,
+        // and one untagged timer would blend the two into a latency neither has. Two values, so bounded.
+        for (TransformPreset preset : TransformPreset.values()) {
+            String tag = presetTag(preset);
+            dialLatency.put(preset, Timer.builder("runner.dial.latency").tag(PRESET_TAG, tag).register(registry));
+            dialSuccess.put(preset, Counter.builder("runner.dial.calls").tag(PRESET_TAG, tag)
+                    .tag("outcome", "success").register(registry));
+            dialError.put(preset, Counter.builder("runner.dial.calls").tag(PRESET_TAG, tag)
+                    .tag("outcome", "error").register(registry));
+        }
         this.validationFailures = Counter.builder("runner.validation.failures").register(registry);
         this.rowsUpserted = Counter.builder("runner.enrichment.rows.upserted").register(registry);
         this.class1TickFailures = Counter.builder("runner.class1.tick.failures").register(registry);
@@ -212,7 +223,10 @@ public class RunnerMetrics {
         }
         // A 429 is also counted as an error above: it *is* a failed call, and removing it from the error total
         // would make the error rate under-report. Two dimensions, not two populations.
-        this.dialRateLimited = Counter.builder("runner.dial.rate.limited").register(registry);
+        for (TransformPreset preset : TransformPreset.values()) {
+            dialRateLimited.put(preset, Counter.builder("runner.dial.rate.limited")
+                    .tag(PRESET_TAG, presetTag(preset)).register(registry));
+        }
         this.groupsEvaluated = Counter.builder("runner.group.evaluated").register(registry);
         this.groupsDeadLettered = Counter.builder("runner.group.dead.lettered").register(registry);
         this.supersededGroupEvaluations =
@@ -237,22 +251,27 @@ public class RunnerMetrics {
         return Timer.start(registry);
     }
 
-    public void recordDialSuccess(Timer.Sample sample) {
-        sample.stop(dialLatency);
-        dialSuccess.increment();
+    public void recordDialSuccess(TransformPreset preset, Timer.Sample sample) {
+        sample.stop(dialLatency.get(preset));
+        dialSuccess.get(preset).increment();
     }
 
-    public void recordDialError(Timer.Sample sample) {
-        sample.stop(dialLatency);
-        dialError.increment();
+    public void recordDialError(TransformPreset preset, Timer.Sample sample) {
+        sample.stop(dialLatency.get(preset));
+        dialError.get(preset).increment();
     }
 
     /**
      * Records a rate-limited (429) DIAL call. Also counted as an error by the caller: rate-limit pressure needs
      * telling apart from model failure, but a 429 is still a failed call.
      */
-    public void recordDialRateLimited() {
-        dialRateLimited.increment();
+    public void recordDialRateLimited(TransformPreset preset) {
+        dialRateLimited.get(preset).increment();
+    }
+
+    /** A preset as the DIAL meters and the DIAL span tag it: its wire name, {@code chat_completion} or {@code dial_app_route}. */
+    public static String presetTag(TransformPreset preset) {
+        return preset.name().toLowerCase(Locale.ROOT);
     }
 
     /** Records a group evaluated to completion. */

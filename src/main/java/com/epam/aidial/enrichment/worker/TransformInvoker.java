@@ -2,32 +2,32 @@ package com.epam.aidial.enrichment.worker;
 
 import com.epam.aidial.enrichment.adas.dto.PipelineDto;
 import com.epam.aidial.enrichment.adas.dto.TransformDto;
+import com.epam.aidial.enrichment.adas.dto.TransformPreset;
 import com.epam.aidial.enrichment.configuration.WorkerProperties;
-import com.epam.aidial.enrichment.dial.DialClient;
 import com.epam.aidial.enrichment.dial.DialRateLimiter;
-import com.epam.aidial.enrichment.dial.dto.ChatResponse;
 import com.epam.aidial.enrichment.dlq.DlqStage;
-import com.epam.aidial.enrichment.exception.ErrorMessages;
 import com.epam.aidial.enrichment.exception.ResponseValidationException;
 import com.epam.aidial.enrichment.exception.TransientChunkException;
 import com.epam.aidial.enrichment.observability.RunnerMetrics;
 import com.epam.aidial.enrichment.observability.RunnerTracer;
 import com.epam.aidial.enrichment.spend.SpendService;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClientResponseException;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Derives a transform's output columns from a set of input variables: render the request template, build
- * the DIAL request, call the model, validate the response against the entry's resolved schema with a
- * bounded repair retry, and map the result to physical enrichment columns.
+ * the DIAL request for the transform's preset (see {@link DialCall}), call the deployment, validate the response
+ * against the entry's resolved schema, and map the result to physical enrichment columns. Whether a schema mismatch
+ * gets a bounded repair retry depends on the preset: a chat completion is re-asked with a corrective message, an
+ * application route is not (see {@link DialCall#repairs()}).
  *
  * <p><strong>The schema comes from the entry, the request from the transform.</strong> The transform block
  * carries what the call is made <em>of</em> — model, preset, params, template — while the schema the model
@@ -47,13 +47,11 @@ import java.util.Map;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class TransformInvoker {
 
-    private final DialClient dialClient;
+    private final Map<TransformPreset, DialCall> calls;
     private final DialRateLimiter dialRateLimiter;
     private final TemplateRenderer templateRenderer;
-    private final DialRequestBuilder requestBuilder;
     private final ResponseValidator responseValidator;
     private final OutputMapper outputMapper;
     private final SpendService spendService;
@@ -63,6 +61,49 @@ public class TransformInvoker {
     private final JsonMapper jsonMapper;
 
     /**
+     * Indexes the calls by preset, failing at startup when a preset has no call or two: a gap would otherwise
+     * surface only when the first pipeline of that preset is evaluated, and a duplicate would pick one silently.
+     */
+    public TransformInvoker(List<DialCall> calls, DialRateLimiter dialRateLimiter, TemplateRenderer templateRenderer,
+                            ResponseValidator responseValidator, OutputMapper outputMapper, SpendService spendService,
+                            RunnerMetrics runnerMetrics, RunnerTracer runnerTracer, WorkerProperties workerProperties,
+                            JsonMapper jsonMapper) {
+        this.calls = index(calls);
+        this.dialRateLimiter = dialRateLimiter;
+        this.templateRenderer = templateRenderer;
+        this.responseValidator = responseValidator;
+        this.outputMapper = outputMapper;
+        this.spendService = spendService;
+        this.runnerMetrics = runnerMetrics;
+        this.runnerTracer = runnerTracer;
+        this.workerProperties = workerProperties;
+        this.jsonMapper = jsonMapper;
+    }
+
+    private static Map<TransformPreset, DialCall> index(List<DialCall> calls) {
+        Map<TransformPreset, DialCall> byPreset = new EnumMap<>(TransformPreset.class);
+        for (DialCall call : calls) {
+            if (byPreset.putIfAbsent(call.preset(), call) != null) {
+                throw new IllegalStateException("two DIAL calls implement preset " + call.preset());
+            }
+        }
+        for (TransformPreset preset : TransformPreset.values()) {
+            if (!byPreset.containsKey(preset)) {
+                throw new IllegalStateException("no DIAL call implements preset " + preset);
+            }
+        }
+        return byPreset;
+    }
+
+    /**
+     * The unit a transform's calls are recorded in, so a lane recording a failed call charges it in the same unit as
+     * a successful one.
+     */
+    public String usageUnit(TransformDto transform) {
+        return callFor(transform).usageUnit();
+    }
+
+    /**
      * Renders, calls, validates and output-maps one evaluation.
      *
      * @return the mapped physical enrichment columns, without grain key or provenance
@@ -70,61 +111,76 @@ public class TransformInvoker {
      * @throws ResponseValidationException when the response still fails its schema after the repair budget
      */
     public Map<String, Object> derive(PipelineDto pipeline, TransformDto transform, Map<String, Object> inputs) {
+        DialCall call = callFor(transform);
         String rendered = templateRenderer.render(transform.requestTemplate(), inputs);
-        String requestBody = requestBuilder.build(rendered, transform.params(), pipeline.responseSchema());
-        String content = callWithRepair(pipeline, transform, requestBody);
+        String requestBody = call.body(rendered, transform, pipeline.responseSchema());
+        String content = callWithRepair(call, pipeline, transform, requestBody);
         return outputMapper.map(pipeline, parseContent(content));
     }
 
-    private String callWithRepair(PipelineDto pipeline, TransformDto transform, String requestBody) {
+    /** The call for the transform's preset; an absent preset is a chat completion, as ADAS defaults it. */
+    private DialCall callFor(TransformDto transform) {
+        return calls.get(transform.preset() == null ? TransformPreset.CHAT_COMPLETION : transform.preset());
+    }
+
+    private String callWithRepair(DialCall call, PipelineDto pipeline, TransformDto transform, String requestBody) {
         Map<String, Object> responseSchema = pipeline.responseSchema();
         String currentBody = requestBody;
-        String content = invoke(pipeline, transform, currentBody);
-        List<String> errors = responseValidator.validate(responseSchema, content);
+        DialCall.Reply reply = invoke(call, pipeline, transform, currentBody);
+        List<String> errors = responseValidator.validate(responseSchema, reply.output());
 
         int repairs = 0;
-        while (!errors.isEmpty() && repairs < workerProperties.repairRetries()) {
-            currentBody = requestBuilder.withCorrectiveMessage(currentBody, errors);
-            content = invoke(pipeline, transform, currentBody);
-            errors = responseValidator.validate(responseSchema, content);
+        while (!errors.isEmpty() && call.repairs() && repairs < workerProperties.repairRetries()) {
+            currentBody = call.withCorrection(currentBody, errors);
+            reply = invoke(call, pipeline, transform, currentBody);
+            errors = responseValidator.validate(responseSchema, reply.output());
             repairs++;
         }
         if (!errors.isEmpty()) {
-            throw new ResponseValidationException(String.join("; ", errors), content);
+            throw new ResponseValidationException(String.join("; ", errors), reply.evidence());
         }
-        return content;
+        return reply.output();
     }
 
-    /** Rate-limited, span-wrapped DIAL call that records best-effort spend and returns the content. */
-    private String invoke(PipelineDto pipeline, TransformDto transform, String requestBody) {
+    /** Rate-limited, span-wrapped DIAL call that records best-effort spend and returns what the reply yields. */
+    private DialCall.Reply invoke(DialCall call, PipelineDto pipeline, TransformDto transform, String requestBody) {
         if (!dialRateLimiter.acquire(pipeline.name(), pipeline.rateRpm())) {
             throw new TransientChunkException(DlqStage.DIAL_CALL, "rate limited for pipeline " + pipeline.name(), null);
         }
+        TransformPreset preset = call.preset();
         var sample = runnerMetrics.startDialTimer();
         String raw;
         try {
-            raw = runnerTracer.inSpan("enrichment.dial-call", dialSpanAttributes(pipeline, transform),
-                    () -> dialClient.chatCompletion(transform.model(), requestBody));
+            raw = runnerTracer.inSpan("enrichment.dial-call", dialSpanAttributes(pipeline, transform, call),
+                    () -> call.call(transform, requestBody));
         } catch (RuntimeException e) {
-            runnerMetrics.recordDialError(sample);
+            runnerMetrics.recordDialError(preset, sample);
             if (e instanceof RestClientResponseException http && http.getStatusCode().value() == 429) {
                 // Also counted as an error above: rate-limit pressure needs telling apart from model failure,
                 // but a 429 is still a failed call and dropping it would make the error rate under-report.
-                runnerMetrics.recordDialRateLimited();
+                runnerMetrics.recordDialRateLimited(preset);
             }
             throw e;
         }
-        runnerMetrics.recordDialSuccess(sample);
-        ChatResponse response = parseResponse(pipeline, raw);
-        spendService.record(pipeline.name(), pipeline.generation(), tokens(response), false);
-        return response != null ? response.firstContent() : null;
+        runnerMetrics.recordDialSuccess(preset, sample);
+        DialCall.Reply reply;
+        try {
+            reply = call.read(pipeline, raw);
+        } catch (ResponseValidationException unreadable) {
+            // The call succeeded and is counted; only its reply yielded nothing to validate.
+            spendService.record(pipeline.name(), pipeline.generation(), 0, call.usageUnit(), false);
+            throw unreadable;
+        }
+        spendService.record(pipeline.name(), pipeline.generation(), reply.usage(), call.usageUnit(), false);
+        return reply;
     }
 
-    private static Map<String, String> dialSpanAttributes(PipelineDto pipeline, TransformDto transform) {
+    private static Map<String, String> dialSpanAttributes(PipelineDto pipeline, TransformDto transform, DialCall call) {
         Map<String, String> attributes = new LinkedHashMap<>();
         attributes.put("pipeline.name", pipeline.name());
         attributes.put("pipeline.generation", Long.toString(pipeline.generation()));
         attributes.put("model", transform.model());
+        attributes.put("preset", RunnerMetrics.presetTag(call.preset()));
         putIfPresent(attributes, "chunk.id", MDC.get(WorkerMdc.CHUNK_ID));
         putIfPresent(attributes, "grain.key", MDC.get(WorkerMdc.GRAIN_KEY));
         putIfPresent(attributes, "group.key", MDC.get(WorkerMdc.GROUP_KEY));
@@ -135,25 +191,6 @@ public class TransformInvoker {
         if (value != null) {
             attributes.put(key, value);
         }
-    }
-
-    private ChatResponse parseResponse(PipelineDto pipeline, String dialResponse) {
-        try {
-            return jsonMapper.readValue(dialResponse, ChatResponse.class);
-        } catch (RuntimeException e) {
-            // A malformed chat envelope is treated as "no content" so the repair/validate gate handles it. Logged by
-            // its classified type only: the parser's message quotes the envelope, which carries model output.
-            log.warn("Malformed DIAL chat envelope for pipeline {}; treating it as no content: {}", pipeline.name(),
-                    ErrorMessages.classify(e));
-            return null;
-        }
-    }
-
-    private static long tokens(ChatResponse response) {
-        if (response == null || response.usage() == null || response.usage().totalTokens() == null) {
-            return 0;
-        }
-        return response.usage().totalTokens();
     }
 
     private Object parseContent(String content) {

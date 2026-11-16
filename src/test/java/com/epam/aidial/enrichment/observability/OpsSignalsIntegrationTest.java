@@ -2,6 +2,7 @@ package com.epam.aidial.enrichment.observability;
 
 import com.epam.aidial.enrichment.adas.dto.PipelineDto;
 import com.epam.aidial.enrichment.adas.dto.ReadyWhenDto;
+import com.epam.aidial.enrichment.adas.dto.TransformPreset;
 import com.epam.aidial.enrichment.adas.dto.TriggerKind;
 import com.epam.aidial.enrichment.integration.PostgresContainerSupport;
 import com.epam.aidial.enrichment.support.TestPipelines;
@@ -9,6 +10,7 @@ import com.epam.aidial.enrichment.sync.PipelineCache;
 import com.epam.aidial.enrichment.worker.group.GroupChunkTask;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -43,6 +45,8 @@ class OpsSignalsIntegrationTest {
 
     private static final String PIPELINE_NAME = "r-ops";
     private static final String GROUP_KEY = "chat-a";
+    private static final String CHAT = "chat_completion";
+    private static final String ROUTE = "dial_app_route";
 
     @Autowired
     private MockMvc mockMvc;
@@ -219,14 +223,35 @@ class OpsSignalsIntegrationTest {
 
     @Test
     void rateLimitedCallIsCountedAsRateLimitedAndError() {
-        double errorsBefore = counter("runner.dial.calls", "outcome", "error");
-        double limitedBefore = counter("runner.dial.rate.limited", null, null);
+        double errorsBefore = dialCounter("runner.dial.calls", CHAT, "error");
+        double limitedBefore = dialCounter("runner.dial.rate.limited", CHAT, null);
 
-        runnerMetrics.recordDialRateLimited();
+        runnerMetrics.recordDialRateLimited(TransformPreset.CHAT_COMPLETION);
 
         // Two dimensions, not two populations: a 429 is still a failed call.
-        assertThat(counter("runner.dial.rate.limited", null, null)).isEqualTo(limitedBefore + 1);
-        assertThat(counter("runner.dial.calls", "outcome", "error")).isEqualTo(errorsBefore);
+        assertThat(dialCounter("runner.dial.rate.limited", CHAT, null)).isEqualTo(limitedBefore + 1);
+        assertThat(dialCounter("runner.dial.calls", CHAT, "error")).isEqualTo(errorsBefore);
+    }
+
+    /** A route call and a chat call land on series of their own, so neither preset's latency is blended into the other's. */
+    @Test
+    void dialMetersAreTaggedByPreset() {
+        long routeBefore = dialLatency(ROUTE).count();
+        long chatBefore = dialLatency(CHAT).count();
+        double routeSuccessBefore = dialCounter("runner.dial.calls", ROUTE, "success");
+        double chatSuccessBefore = dialCounter("runner.dial.calls", CHAT, "success");
+
+        runnerMetrics.recordDialSuccess(TransformPreset.DIAL_APP_ROUTE, runnerMetrics.startDialTimer());
+
+        assertThat(dialLatency(ROUTE).count()).isEqualTo(routeBefore + 1);
+        assertThat(dialLatency(CHAT).count()).isEqualTo(chatBefore);
+        assertThat(dialCounter("runner.dial.calls", ROUTE, "success")).isEqualTo(routeSuccessBefore + 1);
+        assertThat(dialCounter("runner.dial.calls", CHAT, "success")).isEqualTo(chatSuccessBefore);
+        // Pre-registered for both presets, and tagged by nothing else.
+        assertThat(meterRegistry.find("runner.dial.rate.limited").counters()).hasSize(2);
+        assertThat(meterRegistry.find("runner.dial.latency").timers())
+                .extracting(timer -> timer.getId().getTag(RunnerMetrics.PRESET_TAG))
+                .containsExactlyInAnyOrder(CHAT, ROUTE);
     }
 
     @Test
@@ -298,6 +323,18 @@ class OpsSignalsIntegrationTest {
                 .grainKey("chat_id")
                 .readyWhen(new ReadyWhenDto(null, "10m", null, null))
                 .build();
+    }
+
+    private Timer dialLatency(String preset) {
+        return meterRegistry.get("runner.dial.latency").tag(RunnerMetrics.PRESET_TAG, preset).timer();
+    }
+
+    private double dialCounter(String name, String preset, String outcome) {
+        var search = meterRegistry.get(name).tag(RunnerMetrics.PRESET_TAG, preset);
+        if (outcome != null) {
+            search = search.tag("outcome", outcome);
+        }
+        return search.counter().count();
     }
 
     private double counter(String name, String tagKey, String tagValue) {

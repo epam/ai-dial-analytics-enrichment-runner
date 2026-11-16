@@ -175,4 +175,67 @@ class TemplateRendererTest {
     private Map<String, Object> parse(String json) {
         return jsonMapper.readValue(json, new TypeReference<>() { });
     }
+
+    // --- {{name:json}}: a value as a JSON literal in value position -----------------------------------------
+
+    @Test
+    void rawMembersRenderAsJsonArray() {
+        String out = renderer.render("{\"members\": {{members:json}}}",
+                Map.of("members", List.of(Map.of("text", "a"), Map.of("text", "b \"quoted\""))));
+
+        assertThat(parse(out).get("members")).isEqualTo(List.of(Map.of("text", "a"), Map.of("text", "b \"quoted\"")));
+    }
+
+    @Test
+    void rawNullRendersAsJsonNull() {
+        Map<String, Object> inputs = new HashMap<>();
+        inputs.put("note", null);
+
+        assertThat(renderer.render("{\"note\": {{note:json}}}", inputs)).isEqualTo("{\"note\": null}");
+    }
+
+    @Test
+    void rawStringRendersQuotedOnce() {
+        String out = renderer.render("{\"s\": {{s:json}}}", Map.of("s", "he said \"hi\""));
+
+        assertThat(parse(out)).containsEntry("s", "he said \"hi\"");
+    }
+
+    @Test
+    void unboundRawPlaceholderFailsNamingTheVariable() {
+        assertThatThrownBy(() -> renderer.render("{\"x\": {{missing:json}}}", Map.of()))
+                .isInstanceOf(UnresolvedPlaceholderException.class)
+                .hasMessageContaining("missing");
+    }
+
+    @Test
+    void unknownSuffixFailsAsUnbound() {
+        assertThatThrownBy(() -> renderer.render("{\"x\": {{members:yaml}}}", Map.of("members", List.of())))
+                .isInstanceOf(UnresolvedPlaceholderException.class)
+                .hasMessageContaining("members:yaml");
+    }
+
+    // --- whitespace inside the braces, as ADAS's placeholder rule admits it ------------------------------------
+
+    @Test
+    void whitespaceInsideTheBracesNamesTheSameVariable() {
+        String out = renderer.render("{\"content\":\"{{ prompt }}\", \"n\": {{\tcount }}}",
+                Map.of("prompt", "hello", "count", 7));
+
+        assertThat(parse(out)).containsEntry("content", "hello").containsEntry("n", 7);
+    }
+
+    @Test
+    void whitespaceAroundJsonSuffixedPlaceholderRendersItRaw() {
+        String out = renderer.render("{\"members\": {{ members:json }}}", Map.of("members", List.of("a", "b")));
+
+        assertThat(parse(out).get("members")).isEqualTo(List.of("a", "b"));
+    }
+
+    @Test
+    void anUnboundPlaceholderWithWhitespaceIsReportedByItsTrimmedName() {
+        assertThatThrownBy(() -> renderer.render("{\"x\": {{ missing:json }}}", Map.of()))
+                .isInstanceOf(UnresolvedPlaceholderException.class)
+                .hasMessageEndingWith("work: missing");
+    }
 }

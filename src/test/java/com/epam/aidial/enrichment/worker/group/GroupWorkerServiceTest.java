@@ -360,6 +360,24 @@ class GroupWorkerServiceTest {
         verify(dlqCircuitBreaker).recordGroupFailure(PIPELINE_NAME);
     }
 
+    /** A refused call is charged in its preset's unit, so a failure cannot be the record that fixes the day's unit wrongly. */
+    @Test
+    void refusedModelCallIsChargedInThePresetsUnit() {
+        cachePipeline();
+        stubMembers(false);
+        stubAssembly(false);
+        stubCharge(true);
+        when(transformInvoker.usageUnit(any())).thenReturn(SpendService.CALLS_UNIT);
+        when(transformInvoker.derive(any(), any(), any()))
+                .thenThrow(new RestClientResponseException("400 Bad Request",
+                        HttpStatusCode.valueOf(400), "Bad Request", new HttpHeaders(), null, null));
+
+        worker.process("item-1", payload());
+
+        assertThat(deadLettered().getStage()).isEqualTo(DlqStage.DIAL_CALL.dbValue());
+        verify(spendService).record(PIPELINE_NAME, GENERATION, 0, SpendService.CALLS_UNIT, true);
+    }
+
     @Test
     void successPathDefersTheStampToTheWrite() {
         // "Clean" must mean "written": stamping at compute time would mark a group clean before its row landed,

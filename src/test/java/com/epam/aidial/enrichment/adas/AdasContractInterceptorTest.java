@@ -197,17 +197,17 @@ class AdasContractInterceptorTest {
     }
 
     /**
-     * Pinned as a literal, not as {@link AdasContract#VERSION_VALUE}: the far side's constant is {@code 4} since
-     * ADAS aligned row-grain enrichments, and a test reading the constant back would pass whatever it said.
+     * Pinned as a literal, not as {@link AdasContract#VERSION_VALUE}: the far side's constant is {@code 5} since
+     * ADAS added the {@code dial_app_route} preset, and a test reading the constant back would pass whatever it said.
      */
     @Test
-    void everyCallDeclaresContractVersionFour() {
+    void everyCallDeclaresContractVersionFive() {
         ADAS.stubFor(post(urlPathEqualTo(ROWS_PATH)).willReturn(okJson("{\"inserted\":1}")));
 
         postRows();
 
-        assertThat(AdasContract.VERSION).isEqualTo(4);
-        ADAS.verify(postRequestedFor(urlPathEqualTo(ROWS_PATH)).withHeader(AdasContract.HEADER, equalTo("4")));
+        assertThat(AdasContract.VERSION).isEqualTo(5);
+        ADAS.verify(postRequestedFor(urlPathEqualTo(ROWS_PATH)).withHeader(AdasContract.HEADER, equalTo("5")));
         assertThat(compatibilityState.isCompatible()).isTrue();
     }
 

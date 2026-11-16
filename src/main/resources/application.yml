@@ -119,6 +119,7 @@ dial:
   read-timeout-ms: ${DIAL_READ_TIMEOUT_MS:60000}
   default-rpm: ${DIAL_DEFAULT_RPM:60}
   rate-limiter-timeout: ${DIAL_RATE_LIMITER_TIMEOUT:5s}
+  route-read-timeout-ms: ${DIAL_ROUTE_READ_TIMEOUT_MS:180000}
 
 worker:
   repair-retries: ${WORKER_REPAIR_RETRIES:1}

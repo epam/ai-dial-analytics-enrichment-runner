@@ -38,6 +38,8 @@ import java.util.Map;
  *                       {@code sql} output is a bare expression string ADAS evaluates in ClickHouse, and an
  *                       {@code llm} output's prose and value list are ADAS's schema-composition inputs. What
  *                       the runner executes is the <em>resolved</em> {@link PipelineDto#outputs()} list
+ * @param route          the application route called under {@code /v1/deployments/{model}/route/}
+ *                       ({@code dial_app_route} only)
  */
 public record TransformDto(
         TransformType type,
@@ -46,5 +48,6 @@ public record TransformDto(
         Map<String, Object> params,
         @JsonProperty("request_template") String requestTemplate,
         Map<String, VarDto> inputs,
-        Map<String, Object> outputs) {
+        Map<String, Object> outputs,
+        String route) {
 }

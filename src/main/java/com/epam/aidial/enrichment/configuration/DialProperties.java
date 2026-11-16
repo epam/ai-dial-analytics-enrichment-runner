@@ -19,7 +19,9 @@ import java.time.Duration;
  *                           failure and dead-letters the row. Blank omits the parameter, for an adapter
  *                           that does not want it.
  * @param connectTimeoutMs   HTTP connect timeout in milliseconds
- * @param readTimeoutMs      HTTP read timeout in milliseconds
+ * @param readTimeoutMs      HTTP read timeout in milliseconds for chat/completions calls
+ * @param routeReadTimeoutMs HTTP read timeout in milliseconds for application-route calls, which make model calls
+ *                           of their own and so run longer than one model call
  * @param defaultRpm         per-pipeline rate-limit requests-per-minute when a pipeline declares no rate budget
  * @param rateLimiterTimeout how long a worker waits for a rate-limit permit before failing the chunk
  */
@@ -31,7 +33,8 @@ public record DialProperties(
         int connectTimeoutMs,
         int readTimeoutMs,
         int defaultRpm,
-        Duration rateLimiterTimeout) {
+        Duration rateLimiterTimeout,
+        int routeReadTimeoutMs) {
 
     /** Redacts {@code apiKey} so an accidental log or actuator dump never leaks the credential. */
     @Override
@@ -39,6 +42,6 @@ public record DialProperties(
         return "DialProperties[baseUrl=" + baseUrl + ", apiKey=***, apiVersion=" + apiVersion
                 + ", connectTimeoutMs=" + connectTimeoutMs
                 + ", readTimeoutMs=" + readTimeoutMs + ", defaultRpm=" + defaultRpm
-                + ", rateLimiterTimeout=" + rateLimiterTimeout + "]";
+                + ", rateLimiterTimeout=" + rateLimiterTimeout + ", routeReadTimeoutMs=" + routeReadTimeoutMs + "]";
     }
 }

@@ -49,12 +49,21 @@ import java.util.regex.Pattern;
 public class TemplateRenderer {
 
     /**
-     * One placeholder, matched non-greedily and without crossing a brace. {@link #render} substitutes on an
-     * exact {@code "{{" + key + "}}"} match, so the name this captures is the name the substitution needs —
-     * no trimming, no whitespace tolerance, and no second grammar that could accept what substitution will
-     * not.
+     * One placeholder, matched non-greedily and without crossing a brace. The captured token is stripped of
+     * surrounding whitespace before its suffix and name are read, so {@code {{ members }}} and
+     * {@code {{ members:json }}} name {@code members}, as ADAS's placeholder rule reads them. The grammar matches
+     * ADAS's: a template ADAS admits binds the same names here, rather than passing admission and then failing
+     * every unit as unbound. Binding and substitution read the token through the same {@link #nameOf}, so there
+     * is no second grammar that could accept what substitution will not.
      */
     private static final Pattern PLACEHOLDER = Pattern.compile("\\{\\{([^{}]*)}}");
+
+    /**
+     * The suffix that renders a value as a JSON literal for value position, {@code {{name:json}}}. Only this exact
+     * suffix is stripped; any other stays part of the name, which then binds to nothing and fails the unit as
+     * unbound rather than rendering through.
+     */
+    static final String JSON_SUFFIX = ":json";
 
     private final JsonMapper jsonMapper;
 
@@ -76,8 +85,11 @@ public class TemplateRenderer {
         while (matcher.find()) {
             // containsKey holds for every match the assertion above let through; the branch is what keeps
             // that true rather than assumed, and leaves an unbound name as written rather than as "null".
-            String name = matcher.group(1);
-            String replacement = inputs.containsKey(name) ? replacement(inputs.get(name)) : matcher.group();
+            String token = matcher.group(1).strip();
+            boolean raw = isRaw(token);
+            String name = nameOf(token);
+            String replacement = !inputs.containsKey(name) ? matcher.group()
+                    : raw ? rawReplacement(inputs.get(name)) : replacement(inputs.get(name));
             matcher.appendReplacement(rendered, Matcher.quoteReplacement(replacement));
         }
         matcher.appendTail(rendered);
@@ -99,7 +111,7 @@ public class TemplateRenderer {
         Set<String> unresolved = new LinkedHashSet<>();
         Matcher matcher = PLACEHOLDER.matcher(template);
         while (matcher.find()) {
-            String name = matcher.group(1);
+            String name = nameOf(matcher.group(1).strip());
             if (!inputs.containsKey(name)) {
                 unresolved.add(name);
             }
@@ -124,6 +136,24 @@ public class TemplateRenderer {
             return innerText(jsonMapper.writeValueAsString(jsonMapper.writeValueAsString(value)));
         }
         // Numbers and booleans stay raw JSON literals: those interpolate in value position.
+        return jsonMapper.writeValueAsString(value);
+    }
+
+    private static boolean isRaw(String token) {
+        return token.endsWith(JSON_SUFFIX) && token.length() > JSON_SUFFIX.length();
+    }
+
+    /** The variable a placeholder token names: the token itself, or the part before {@link #JSON_SUFFIX}. */
+    private static String nameOf(String token) {
+        return isRaw(token) ? token.substring(0, token.length() - JSON_SUFFIX.length()) : token;
+    }
+
+    /**
+     * A value as a JSON literal for value position: a string quoted, a number or boolean bare, a list or map as its
+     * JSON text, and a bound null as {@code null}. Unlike {@link #replacement} nothing is escaped a second time, so
+     * the template places it outside a string literal.
+     */
+    private String rawReplacement(Object value) {
         return jsonMapper.writeValueAsString(value);
     }
 

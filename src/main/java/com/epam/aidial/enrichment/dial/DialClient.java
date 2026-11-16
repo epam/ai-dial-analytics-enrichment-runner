@@ -11,13 +11,14 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
 /**
- * Calls DIAL Core chat/completions for a deployment. The runner sends a fully-rendered request body
- * (messages + {@code response_format = json_schema} + the transform's params) and returns the raw response
- * body for the worker to parse. A non-2xx response surfaces as a
- * {@code RestClientResponseException} the worker routes per the failure taxonomy.
+ * Calls DIAL Core for a deployment: its chat/completions endpoint, or one of an application's routes. The runner
+ * sends a fully-rendered request body and returns the raw response body for the worker to parse. A chat body carries
+ * the messages, {@code response_format = json_schema} and the transform's params; a route body carries the rendered
+ * template and the params only. A non-2xx response surfaces as a {@code RestClientResponseException} the worker
+ * routes per the failure taxonomy.
  *
- * <p>The call carries an {@code api-version} query parameter. DIAL Core does not consume it — it
- * forwards the caller's query string verbatim to the upstream adapter — and the
+ * <p>A chat call carries an {@code api-version} query parameter; a route call does not. DIAL Core does not consume
+ * it — it forwards the caller's query string verbatim to the upstream adapter — and the
  * Azure-OpenAI-compatible adapters reject a request without it (HTTP 400
  * {@code api-version is a required query parameter}). Since that is a permanent failure, omitting it
  * dead-letters every row of a pipeline bound to such a deployment rather than degrading it, so the
@@ -30,8 +31,12 @@ public class DialClient {
 
     private static final String API_VERSION_PARAM = "api-version";
 
+    private static final String ROUTE_SEPARATOR = "/";
+
     @Qualifier(DialClientConfiguration.DIAL_REST_CLIENT)
     private final RestClient restClient;
+    @Qualifier(DialClientConfiguration.DIAL_ROUTE_REST_CLIENT)
+    private final RestClient routeRestClient;
     private final DialProperties properties;
 
     public String chatCompletion(String deployment, String requestBodyJson) {
@@ -43,6 +48,26 @@ public class DialClient {
                     }
                     return uriBuilder.build(deployment);
                 })
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(requestBodyJson)
+                .retrieve()
+                .body(String.class);
+    }
+
+    /**
+     * POSTs {@code requestBodyJson} to an application route, {@code /v1/deployments/{deployment}/route/{route}}, and
+     * returns the raw response body. The route is appended one segment at a time, each encoded as a path segment, so
+     * no character of it can change the URL's structure; admission has already refused a route outside the grammar. The
+     * deployment is a URI variable, as on the chat call, so a brace in its id is encoded rather than read as a template.
+     * There is no {@code api-version}: that is a chat-completions adapter parameter an application route does not
+     * take.
+     */
+    public String appRoute(String deployment, String route, String requestBodyJson) {
+        return routeRestClient.post()
+                .uri(uriBuilder -> uriBuilder
+                        .pathSegment("v1", "deployments", "{deployment}", "route")
+                        .pathSegment(route.split(ROUTE_SEPARATOR))
+                        .build(deployment))
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(requestBodyJson)
                 .retrieve()

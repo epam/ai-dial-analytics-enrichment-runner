@@ -127,8 +127,10 @@ context: |
     is permanent), which is what makes a 409 from a skewed pair permanent to the predecessor image.
   - Registration (operator-side, not the runner's): POST /v1/pipelines with "kind":"enrich";
     PATCH /v1/pipelines/{name} for updates; DELETE /v1/pipelines/{name}. `name` is immutable.
-  - Model: POST {DIAL}/openai/deployments/{model}/chat/completions, Api-Key header,
-    response_format=json_schema. One DIAL Api-Key authenticates both ADAS and DIAL; authz is by the
+  - Model: by transform.preset. chat_completion: POST {DIAL}/openai/deployments/{model}/chat/completions,
+    response_format=json_schema, api-version. dial_app_route: POST {DIAL}/v1/deployments/{model}/route/{route},
+    no response_format, output read from the body by each output's source, counted in calls. Api-Key header on
+    both. One DIAL Api-Key authenticates both ADAS and DIAL; authz is by the
     pipeline's target-enrichment WRITE grant.
 
   ## Scope
@@ -143,7 +145,7 @@ context: |
   - row x sql (Class-1): no model call; ADAS materializes the derivation set-based via
     POST /v1/pipelines/{name}/materialize and the runner only drives cadence, window and cursor.
   Backfill covers all three lanes and may be bounded to a [from, to] version window.
-  chat_completion preset only; single active replica.
+  Presets chat_completion and dial_app_route; single active replica.
 
   ## Sensitive-data posture
   The runner requires an ADAS identity entitled to read `sensitive` columns (FULL_ADMIN) for any pipeline

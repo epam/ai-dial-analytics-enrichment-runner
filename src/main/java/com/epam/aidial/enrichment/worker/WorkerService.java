@@ -262,7 +262,8 @@ public class WorkerService {
             if (RetryableStatus.isRetryable(e)) {
                 throw new TransientChunkException(DlqStage.DIAL_CALL, e); // let the whole chunk retry
             }
-            spendService.record(payload.getPipelineName(), payload.getPipelineGeneration(), 0, true);
+            spendService.record(payload.getPipelineName(), payload.getPipelineGeneration(), 0,
+                    transformInvoker.usageUnit(transform), true);
             return RowOutcome.dead(dlqItem(payload, row.getGrainKey(), DlqStage.DIAL_CALL, e.getMessage(),
                     e.getResponseBodyAsString()));
         } catch (RestClientException e) {
