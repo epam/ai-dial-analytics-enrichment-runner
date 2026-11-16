@@ -200,6 +200,31 @@ class AppRouteWorkerIntegrationTest {
     }
 
     @Test
+    void bareArrayBodyIsSentAsRendered() {
+        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, bareArrayPipeline(null)));
+        BACKEND.stubFor(post(urlPathEqualTo(ROUTE_PATH)).willReturn(okJson("{\"label\":\"positive\"}")));
+
+        process();
+
+        var calls = BACKEND.findAll(postRequestedFor(urlPathEqualTo(ROUTE_PATH)));
+        assertThat(calls).hasSize(1);
+        assertThat(jsonMapper.readValue(calls.getFirst().getBodyAsString(), Object.class))
+                .isEqualTo(List.of(Map.of("text", "great product")));
+        assertThat(upsertedRow()).containsEntry("sentiment", "positive");
+    }
+
+    @Test
+    void paramsBesideNonObjectBodyAreRefusedWithoutCall() {
+        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, bareArrayPipeline(Map.of("temperature", 0))));
+        BACKEND.stubFor(post(urlPathEqualTo(ROUTE_PATH)).willReturn(okJson("{\"label\":\"positive\"}")));
+
+        process();
+
+        assertThat(BACKEND.findAll(postRequestedFor(urlPathEqualTo(ROUTE_PATH)))).isEmpty();
+        assertThat(dlqCount("output_map")).isEqualTo(1);
+    }
+
+    @Test
     void retryableStatusRetriesAndPermanentOneDeadLettersAtTheCall() {
         pipelineCache.replaceAll(Map.of(PIPELINE_NAME, routePipeline(null)));
         BACKEND.stubFor(post(urlPathEqualTo(ROUTE_PATH)).willReturn(aResponse().withStatus(503)));
@@ -295,6 +320,18 @@ class AppRouteWorkerIntegrationTest {
                 .params(Map.of("temperature", 0))
                 .responseSchema(labelSchema())
                 .outputs(List.of(new OutputDto("label", "sentiment", null, labelSource)))
+                .build();
+    }
+
+    private static PipelineDto bareArrayPipeline(Map<String, Object> params) {
+        return TestPipelines.builder(PIPELINE_NAME)
+                .generation(3)
+                .model("insights-app")
+                .appRoute("v1/insights")
+                .requestTemplate("[{\"text\": {{prompt:json}}}]")
+                .params(params)
+                .responseSchema(labelSchema())
+                .outputs(List.of(new OutputDto("label", "sentiment", null, null)))
                 .build();
     }
 

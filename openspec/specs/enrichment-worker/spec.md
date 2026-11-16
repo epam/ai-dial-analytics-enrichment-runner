@@ -16,8 +16,12 @@ on `transform.preset`:
   `response_format` derived from the entry's top-level `response_schema`. It is POSTed to
   `/openai/deployments/{model}/chat/completions` with the configured `api-version`, and the output is the
   first choice's message content.
-- **`dial_app_route`**: the body is the rendered template overlaid with `transform.params`, with no
-  `response_format`. It is POSTed to `/v1/deployments/{model}/route/{route}` with no `api-version`, and the
+- **`dial_app_route`**: the body is the rendered template, with no `response_format`. It may be **any JSON
+  value**, not only an object: an application whose route takes a bare array, such as a template of exactly
+  `{{members:json}}`, receives exactly that array. `transform.params` are overlaid on the body only when it is
+  an object. A non-empty `params` beside a body that is not an object SHALL fail the unit before any call,
+  because there is nowhere to put a member and dropping it silently would send a request the declaration did
+  not describe. It is POSTed to `/v1/deployments/{model}/route/{route}` with no `api-version`, and the
   output is assembled from the parsed response body by the outputs' `source` expressions (see "A route
   output's value is read from the response by its source before validation"). There is no chat envelope to
   unwrap. The deployment id is encoded as one path segment, as on the chat call, and the route is appended segment by segment, each segment percent-encoded as a path
@@ -68,6 +72,18 @@ as authored".
 - **THEN** the rendered body is POSTed to `/v1/deployments/insights-app/route/v1/insights` with no
   `api-version` query parameter and no `response_format` member, and the output is assembled from the
   response body
+
+#### Scenario: A bare-array route body is sent as rendered
+
+- **GIVEN** an app-route pipeline with no `params` whose template renders to `[{"text": "great product"}]`
+- **WHEN** a unit of work is processed
+- **THEN** the route receives exactly that array as its body
+
+#### Scenario: Params beside a non-object route body are refused without a call
+
+- **GIVEN** an app-route pipeline whose template renders to a JSON array and whose `params` is `{"temperature": 0}`
+- **WHEN** a unit of work is processed
+- **THEN** the route is not called and the unit is dead-lettered naming `transform.params`
 
 #### Scenario: A route failure is classified like a model failure
 

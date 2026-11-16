@@ -19,7 +19,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The {@code dial_app_route} preset: the rendered body plus {@code params} is POSTed to the application's route with
+ * The {@code dial_app_route} preset: the rendered body, which may be any JSON value, plus {@code params} when it is an
+ * object, is POSTed to the application's route with
  * no {@code response_format}, and the output is assembled from the reply body by each output's {@code source}, or its
  * name when it declares none. There is no repair, because a route's body has no conversation to
  * append a correction to, and usage is counted as one call, because an application reports usage in a shape of its
@@ -47,10 +48,13 @@ class AppRouteCall implements DialCall {
         return SpendService.CALLS_UNIT;
     }
 
-    /** The rendered body plus {@code params}; the schema is not sent, since a route takes no {@code response_format}. */
+    /**
+     * The rendered body as it stands, any JSON value, plus {@code params} on an object; the schema is not sent, since a
+     * route takes no {@code response_format}.
+     */
     @Override
     public String body(String renderedTemplate, TransformDto transform, Map<String, Object> responseSchema) {
-        return requestBuilder.build(renderedTemplate, transform.params(), null);
+        return requestBuilder.buildRouteBody(renderedTemplate, transform.params());
     }
 
     @Override
