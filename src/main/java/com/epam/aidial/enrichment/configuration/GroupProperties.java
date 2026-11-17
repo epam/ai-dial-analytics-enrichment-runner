@@ -1,5 +1,6 @@
 package com.epam.aidial.enrichment.configuration;
 
+import com.epam.aidial.enrichment.adas.dto.PipelineDto;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.time.Duration;
@@ -21,7 +22,9 @@ import java.time.Duration;
  * @param fetchLimit       members to request per group. ADAS <em>rejects</em> a value above its own maximum
  *                         with a 400 rather than clamping, so keep this at or below it
  * @param inputTokenBudget approximate token ceiling on a group's assembled input, applied on top of ADAS's
- *                         row and byte caps; 0 disables the runner's own trimming
+ *                         row and byte caps, for every group pipeline that declares no
+ *                         {@code advanced.input_token_budget} of its own; 0 disables the runner's own trimming
+ *                         for those pipelines (see {@link #resolveInputTokenBudget})
  * @param scanCadence      fixed delay of every group pipeline's mark scan. Runner configuration rather than a
  *                         per-pipeline knob, because its only safe direction is short: a slow mark scan lets a
  *                         group's later rows sit unmarked, so the sweep can judge it idle while it is still
@@ -49,6 +52,24 @@ public record GroupProperties(
 
     /** How many items per worker thread the derived depth ceiling allows; see {@link #resolveInflightCeiling}. */
     private static final int ITEMS_PER_THREAD = 10;
+
+    /**
+     * The input token budget for one group pipeline: its own {@code advanced.input_token_budget} when it declares
+     * a value of 0 or more, otherwise {@link #inputTokenBudget}. 0 means the runner does not trim.
+     *
+     * <p>The preset is deliberately not consulted. Whether the runner's four-characters-per-token estimate should
+     * bound a group is a property of what receives it: an application that tokenizes properly and chooses what to
+     * keep opts out with 0, while one that forwards the group to a model needs the guard as much as a
+     * {@code chat_completion} call does — and only the pipeline author knows which kind it is.
+     *
+     * <p>A negative value is read as absent. ADAS validates the knob, so one is a producer defect; reading it as 0
+     * would silently drop the guard, and refusing the pipeline would stop it over a knob that bounds only its
+     * input size.
+     */
+    public int resolveInputTokenBudget(PipelineDto pipeline) {
+        Integer declared = pipeline.inputTokenBudget();
+        return declared != null && declared >= 0 ? declared : inputTokenBudget;
+    }
 
     /** Clamps the per-pass enqueue budget so a misconfigured non-positive value cannot stall the sweep. */
     public int resolveSweepBatch() {

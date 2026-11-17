@@ -536,7 +536,22 @@ class PipelineSyncIntegrationTest {
         assertThat(cached.rowsPerCall()).isNull();
         assertThat(cached.rateRpm()).isNull();
         assertThat(cached.sampleFraction()).isNull();
+        assertThat(cached.inputTokenBudget()).isNull();
         assertThat(instanceIds(PipelineScanTask.TASK_NAME)).containsExactly("r-bare");
+    }
+
+    @Test
+    void inputTokenBudgetIsReadAndDoesNotAffectAdmission() {
+        // The budget applies to the group lane only; on a row pipeline it is inert, and the gate must not
+        // refuse a pipeline over it — ADAS decides whether to accept the declaration.
+        stubPipelines(row("r-budget", 1).replace(ADVANCED, "\"advanced\":{\"rows_per_scan\":1000,\"input_token_budget\":1000},"));
+
+        syncService.sync();
+
+        PipelineDto cached = cache.get("r-budget");
+        assertThat(cached).isNotNull();
+        assertThat(cached.inputTokenBudget()).isEqualTo(1000);
+        assertThat(instanceIds(PipelineScanTask.TASK_NAME)).containsExactly("r-budget");
     }
 
     @Test

@@ -13,6 +13,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Turns a group's member rows into the transform's template input.
@@ -26,9 +27,13 @@ import java.util.Map;
  * a template can talk about "this member's role and its text" instead of relying on two arrays lining up by
  * index. That correlation is the whole point once members carry more than one field.
  *
- * <p>ADAS has already capped the group by rows and by response bytes; this applies the runner's token budget
- * on top. Members arrive oldest-first, so trimming drops from the <em>front</em>: the newest members are the
- * ones most likely to bear on a label about the group's current state. Per-member truncation is a last
+ * <p>ADAS has already capped the group by rows and by response bytes; this applies the pipeline's token budget
+ * on top — its own {@code advanced.input_token_budget}, else {@code group.input-token-budget} (see
+ * {@link GroupProperties#resolveInputTokenBudget}). A budget of 0 trims nothing, for a pipeline whose
+ * application manages its own input; ADAS's caps still apply, and still declare themselves below.
+ *
+ * <p>Members arrive oldest-first, so trimming drops from the <em>front</em>: the newest members are the ones
+ * most likely to bear on a label about the group's current state. Per-member truncation is a last
  * resort, for the case ADAS deliberately allows — a single member larger than the whole byte cap — and it
  * cuts in the <em>same direction</em>: a field too long to fit keeps its <b>tail</b>, and says so where it
  * was cut. The fields this reaches are payload columns such as {@code assembled_response} and
@@ -106,6 +111,12 @@ public class GroupInputAssembler {
     private final GroupProperties groupProperties;
 
     /**
+     * The generation each pipeline last logged a negative budget for, so a producer defect is reported once per
+     * declaration revision rather than on every group evaluation. Bounded by the number of pipeline names.
+     */
+    private final Map<String, Long> negativeBudgetLogged = new ConcurrentHashMap<>();
+
+    /**
      * @param members   the per-member input objects, oldest first
      * @param truncated whether the member list is partial — either the runner's budget trimmed it or ADAS's
      *                  caps did. The two are deliberately not distinguished: what a reader and a model both
@@ -179,12 +190,23 @@ public class GroupInputAssembler {
         for (Map<String, Object> row : memberRows) {
             mapped.add(inputMapper.map(pipeline, row));
         }
-        AssembledInput budgeted = applyBudget(mapped);
+        AssembledInput budgeted = applyBudget(mapped, resolveBudget(pipeline));
         return fetchTruncated ? budgeted.markTruncated() : budgeted;
     }
 
-    private AssembledInput applyBudget(List<Map<String, Object>> members) {
-        int budget = groupProperties.inputTokenBudget();
+    private int resolveBudget(PipelineDto pipeline) {
+        Integer declared = pipeline.inputTokenBudget();
+        if (declared != null && declared < 0) {
+            Long previous = negativeBudgetLogged.put(pipeline.name(), pipeline.generation());
+            if (previous == null || previous != pipeline.generation()) {
+                log.warn("Pipeline {} at generation {} declares a negative advanced.input_token_budget ({}); "
+                        + "using group.input-token-budget instead", pipeline.name(), pipeline.generation(), declared);
+            }
+        }
+        return groupProperties.resolveInputTokenBudget(pipeline);
+    }
+
+    private AssembledInput applyBudget(List<Map<String, Object>> members, int budget) {
         if (budget <= 0 || members.isEmpty()) {
             return new AssembledInput(members, false, 0, false);
         }
