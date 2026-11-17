@@ -13,7 +13,6 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Turns a group's member rows into the transform's template input.
@@ -111,12 +110,6 @@ public class GroupInputAssembler {
     private final GroupProperties groupProperties;
 
     /**
-     * The generation each pipeline last logged a negative budget for, so a producer defect is reported once per
-     * declaration revision rather than on every group evaluation. Bounded by the number of pipeline names.
-     */
-    private final Map<String, Long> negativeBudgetLogged = new ConcurrentHashMap<>();
-
-    /**
      * @param members   the per-member input objects, oldest first
      * @param truncated whether the member list is partial — either the runner's budget trimmed it or ADAS's
      *                  caps did. The two are deliberately not distinguished: what a reader and a model both
@@ -190,23 +183,11 @@ public class GroupInputAssembler {
         for (Map<String, Object> row : memberRows) {
             mapped.add(inputMapper.map(pipeline, row));
         }
-        AssembledInput budgeted = applyBudget(mapped, resolveBudget(pipeline));
+        AssembledInput budgeted = applyBudget(pipeline.name(), mapped, groupProperties.resolveInputTokenBudget(pipeline));
         return fetchTruncated ? budgeted.markTruncated() : budgeted;
     }
 
-    private int resolveBudget(PipelineDto pipeline) {
-        Integer declared = pipeline.inputTokenBudget();
-        if (declared != null && declared < 0) {
-            Long previous = negativeBudgetLogged.put(pipeline.name(), pipeline.generation());
-            if (previous == null || previous != pipeline.generation()) {
-                log.warn("Pipeline {} at generation {} declares a negative advanced.input_token_budget ({}); "
-                        + "using group.input-token-budget instead", pipeline.name(), pipeline.generation(), declared);
-            }
-        }
-        return groupProperties.resolveInputTokenBudget(pipeline);
-    }
-
-    private AssembledInput applyBudget(List<Map<String, Object>> members, int budget) {
+    private AssembledInput applyBudget(String pipelineName, List<Map<String, Object>> members, int budget) {
         if (budget <= 0 || members.isEmpty()) {
             return new AssembledInput(members, false, 0, false);
         }
@@ -228,7 +209,8 @@ public class GroupInputAssembler {
             start++;
         }
         if (start < members.size()) {
-            log.info("Trimmed {} oldest member(s) of {} to fit the input budget", start, members.size());
+            log.info("Pipeline {}: trimmed {} oldest member(s) of {} to fit the input budget of {} token(s)", pipelineName,
+                    start, members.size(), budget);
             return new AssembledInput(new ArrayList<>(members.subList(start, members.size())), true, start,
                     false);
         }
@@ -239,8 +221,9 @@ public class GroupInputAssembler {
         int omitted = members.size() - 1;
         CutMember newest = cutToFit(members.getLast(), budget);
         if (newest.cut()) {
-            log.info("Newest member of {} alone exceeds the input budget; cut its oversized field(s) to fit "
-                    + "{} character(s) of content", members.size(), (long) budget * CHARS_PER_TOKEN);
+            log.info("Pipeline {}: newest member of {} alone exceeds the input budget of {} token(s); cut its oversized "
+                    + "field(s) to fit {} character(s) of content", pipelineName, members.size(), budget,
+                    (long) budget * CHARS_PER_TOKEN);
         }
         // The estimate rounds up by a token, so being over it is not proof that anything had to go: when the
         // shared allowance turns out to accommodate every field, nothing was removed and neither the row nor

@@ -69,7 +69,7 @@ What changes on the runner side:
 - **Spend.** A route call is recorded as one call with no token usage. `SPEND_BUDGET_DAILY_CALLS` applies to it,
   and `SPEND_BUDGET_DAILY_TOKENS` does not accrue (see [`spend-tracking`](../openspec/specs/spend-tracking/spec.md)).
 - **Metrics.** `runner.dial.latency`, `runner.dial.calls` and `runner.dial.rate.limited` carry a `preset` tag,
-  `chat_completion` or `dial_app_route`. Queries without a `preset` selector return the same totals as before.
+  `chat_completion` or `dial_app_route`. A query that sums over `preset` returns the same totals as before.
 
 ## 3. Per-pipeline group input budget
 
@@ -90,7 +90,11 @@ still apply to every pipeline. When they narrow a group, the prompt's `members_t
 and the row's `truncated` flag, still say so.
 
 `runner.group.input.budget.cut` now carries a `pipeline` tag, so a budget can be tuned for the pipeline that hits
-it. Queries without a `pipeline` selector return the same total as before.
+it. A query that sums over `pipeline` returns the lane total as before. The series of a pipeline appears with its
+first cut, not at startup, so a panel or alert that expects a zero series before any cut reads it as absent.
+
+A negative `advanced.input_token_budget`, which ADAS refuses, is read as absent and logged once per pipeline
+generation.
 
 ---
 

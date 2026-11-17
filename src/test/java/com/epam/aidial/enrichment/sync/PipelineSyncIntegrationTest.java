@@ -716,6 +716,40 @@ class PipelineSyncIntegrationTest {
         assertThat(instanceIds(PipelineScanTask.TASK_NAME)).containsExactly("g-short");
     }
 
+    /** A negative budget is a producer defect: admitted, read as absent by the worker, and warned once per generation. */
+    @Test
+    void groupPipelineWithNegativeInputBudgetIsWarnedOncePerGenerationAndAdmitted() {
+        EventCapture capture = EventCapture.attach();
+        try {
+            stubPipelines(negativeBudgetGroupPipeline(1) + "," + groupPipeline("g-ok", 1, "\"idle\":\"10m\""));
+            syncService.sync();
+            syncService.sync();
+            assertThat(negativeBudgetWarnings(capture)).hasSize(1)
+                    .allMatch(line -> line.startsWith("Group pipeline g-neg (generation 1)"));
+
+            stubPipelines(negativeBudgetGroupPipeline(2));
+            syncService.sync();
+            assertThat(negativeBudgetWarnings(capture)).hasSize(2);
+        } finally {
+            capture.detach();
+        }
+        assertThat(cache.get("g-neg")).isNotNull();
+        assertThat(instanceIds(PipelineScanTask.TASK_NAME)).containsExactly("g-neg");
+    }
+
+    private static String negativeBudgetGroupPipeline(long generation) {
+        return groupPipeline("g-neg", generation, "\"idle\":\"10m\"")
+                .replace("\"advanced\":{\"rows_per_scan\":1000}", "\"advanced\":{\"rows_per_scan\":1000,\"input_token_budget\":-1}");
+    }
+
+    private static List<String> negativeBudgetWarnings(EventCapture capture) {
+        return capture.events().stream()
+                .filter(event -> event.getLevel() == org.apache.logging.log4j.Level.WARN)
+                .map(event -> event.getMessage().getFormattedMessage())
+                .filter(line -> line.contains("negative advanced.input_token_budget"))
+                .toList();
+    }
+
     private static List<String> shortIdleWarnings(EventCapture capture) {
         return capture.events().stream()
                 .filter(event -> event.getLevel() == org.apache.logging.log4j.Level.WARN)
