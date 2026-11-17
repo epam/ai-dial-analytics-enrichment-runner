@@ -109,7 +109,6 @@ public class RunnerMetrics {
     private final Counter groupsEnqueued;
     private final Counter groupsSweepSuppressed;
     private final Counter groupsSweepDeferred;
-    private final Counter groupInputBudgetCuts;
     private final Counter emptyFeeds;
     private final Counter pipelineStateResets;
     private final Timer groupSweepDuration;
@@ -119,6 +118,7 @@ public class RunnerMetrics {
     private final Map<String, Long> spendByPipeline = new ConcurrentHashMap<>();
     private final Map<String, Gauge> spendGauges = new ConcurrentHashMap<>();
     private final Map<String, Counter> class1RowsByPipeline = new ConcurrentHashMap<>();
+    private final Map<String, Counter> inputBudgetCutsByPipeline = new ConcurrentHashMap<>();
     private final Map<String, Counter> backfillBatchFailuresByPipeline = new ConcurrentHashMap<>();
     private final Map<CursorLane, Counter> cursorStalls = new EnumMap<>(CursorLane.class);
     private final Map<PreFoldWorkItem.Lane, Counter> preFoldWorkItems =
@@ -238,7 +238,6 @@ public class RunnerMetrics {
         // room, which is ordinary while a backlog drains and a symptom when it persists. Summed, neither
         // question can be asked.
         this.groupsSweepDeferred = Counter.builder("runner.group.sweep.deferred").register(registry);
-        this.groupInputBudgetCuts = Counter.builder("runner.group.input.budget.cut").register(registry);
         this.emptyFeeds = Counter.builder("runner.sync.empty.feeds").register(registry);
         this.pipelineStateResets = Counter.builder("runner.pipeline.state.resets").register(registry);
         this.groupSweepDuration = Timer.builder("runner.group.sweep.duration").register(registry);
@@ -316,10 +315,16 @@ public class RunnerMetrics {
      * <p>Distinct from the row's {@code truncated} provenance, which a pipeline's own member-selection policy
      * sets on every narrowed group and which is therefore not a signal about the budget at all. This counts
      * only the case where content the model would otherwise have seen was removed — the measurement any
-     * change to {@code group.input-token-budget} has to be argued from.
+     * change to a pipeline's {@code advanced.input_token_budget}, or to {@code group.input-token-budget}, has to
+     * be argued from.
+     *
+     * <p>Tagged by pipeline because budgets differ per pipeline: a runner-wide count cannot say whose budget is
+     * too tight. A sum over the series recovers the lane total.
      */
-    public void recordInputBudgetCut() {
-        groupInputBudgetCuts.increment();
+    public void recordInputBudgetCut(String pipelineName) {
+        inputBudgetCutsByPipeline.computeIfAbsent(pipelineName, name ->
+                        Counter.builder("runner.group.input.budget.cut").tag("pipeline", name).register(registry))
+                .increment();
     }
 
     /**
@@ -485,6 +490,10 @@ public class RunnerMetrics {
         Counter class1Rows = class1RowsByPipeline.remove(pipelineName);
         if (class1Rows != null) {
             registry.remove(class1Rows);
+        }
+        Counter budgetCuts = inputBudgetCutsByPipeline.remove(pipelineName);
+        if (budgetCuts != null) {
+            registry.remove(budgetCuts);
         }
         Counter backfillFailures = backfillBatchFailuresByPipeline.remove(pipelineName);
         if (backfillFailures != null) {

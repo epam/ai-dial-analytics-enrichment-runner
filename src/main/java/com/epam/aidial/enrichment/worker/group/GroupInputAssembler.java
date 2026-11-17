@@ -26,9 +26,13 @@ import java.util.Map;
  * a template can talk about "this member's role and its text" instead of relying on two arrays lining up by
  * index. That correlation is the whole point once members carry more than one field.
  *
- * <p>ADAS has already capped the group by rows and by response bytes; this applies the runner's token budget
- * on top. Members arrive oldest-first, so trimming drops from the <em>front</em>: the newest members are the
- * ones most likely to bear on a label about the group's current state. Per-member truncation is a last
+ * <p>ADAS has already capped the group by rows and by response bytes; this applies the pipeline's token budget
+ * on top — its own {@code advanced.input_token_budget}, else {@code group.input-token-budget} (see
+ * {@link GroupProperties#resolveInputTokenBudget}). A budget of 0 trims nothing, for a pipeline whose
+ * application manages its own input; ADAS's caps still apply, and still declare themselves below.
+ *
+ * <p>Members arrive oldest-first, so trimming drops from the <em>front</em>: the newest members are the ones
+ * most likely to bear on a label about the group's current state. Per-member truncation is a last
  * resort, for the case ADAS deliberately allows — a single member larger than the whole byte cap — and it
  * cuts in the <em>same direction</em>: a field too long to fit keeps its <b>tail</b>, and says so where it
  * was cut. The fields this reaches are payload columns such as {@code assembled_response} and
@@ -179,12 +183,11 @@ public class GroupInputAssembler {
         for (Map<String, Object> row : memberRows) {
             mapped.add(inputMapper.map(pipeline, row));
         }
-        AssembledInput budgeted = applyBudget(mapped);
+        AssembledInput budgeted = applyBudget(pipeline.name(), mapped, groupProperties.resolveInputTokenBudget(pipeline));
         return fetchTruncated ? budgeted.markTruncated() : budgeted;
     }
 
-    private AssembledInput applyBudget(List<Map<String, Object>> members) {
-        int budget = groupProperties.inputTokenBudget();
+    private AssembledInput applyBudget(String pipelineName, List<Map<String, Object>> members, int budget) {
         if (budget <= 0 || members.isEmpty()) {
             return new AssembledInput(members, false, 0, false);
         }
@@ -206,7 +209,8 @@ public class GroupInputAssembler {
             start++;
         }
         if (start < members.size()) {
-            log.info("Trimmed {} oldest member(s) of {} to fit the input budget", start, members.size());
+            log.info("Pipeline {}: trimmed {} oldest member(s) of {} to fit the input budget of {} token(s)", pipelineName,
+                    start, members.size(), budget);
             return new AssembledInput(new ArrayList<>(members.subList(start, members.size())), true, start,
                     false);
         }
@@ -217,8 +221,9 @@ public class GroupInputAssembler {
         int omitted = members.size() - 1;
         CutMember newest = cutToFit(members.getLast(), budget);
         if (newest.cut()) {
-            log.info("Newest member of {} alone exceeds the input budget; cut its oversized field(s) to fit "
-                    + "{} character(s) of content", members.size(), (long) budget * CHARS_PER_TOKEN);
+            log.info("Pipeline {}: newest member of {} alone exceeds the input budget of {} token(s); cut its oversized "
+                    + "field(s) to fit {} character(s) of content", pipelineName, members.size(), budget,
+                    (long) budget * CHARS_PER_TOKEN);
         }
         // The estimate rounds up by a token, so being over it is not proof that anything had to go: when the
         // shared allowance turns out to accommodate every field, nothing was removed and neither the row nor

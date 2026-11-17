@@ -194,6 +194,31 @@ the operator has deleted. A *failed* poll is the different signal, and is the on
 - **THEN** the transform type binds to the corresponding runner enum and the pipeline is cached without
   the absent model fields being treated as a defect
 
+### Requirement: The input token budget knob is read from advanced
+
+The runner SHALL read `advanced.input_token_budget`, an integer, as one more execution knob beside
+`rows_per_scan`, `rows_per_call`, `rate_rpm` and `sample_fraction`, under that single name and with the same
+absence rule: an absent `advanced`, or an absent `input_token_budget` within it, SHALL mean "apply the runner's own
+default" (see the `group-enrichment` requirement *The input token budget is chosen per pipeline*). Adding the
+knob raises the contract version to `6` (see *Every ADAS call declares a contract version and every response is
+checked for its echo*). The runner SHALL NOT refuse a pipeline in the admission gate because of the
+knob's value or because the knob is present on a pipeline that is not on the group lane.
+
+#### Scenario: A declared input token budget is read
+
+- **WHEN** ADAS returns a pipeline whose `advanced` carries `input_token_budget: 1000`
+- **THEN** the cached pipeline exposes an input token budget of `1000`
+
+#### Scenario: An absent input token budget is read as unset
+
+- **WHEN** ADAS returns a pipeline whose `advanced` omits `input_token_budget`, or which carries no `advanced`
+- **THEN** the cached pipeline exposes no input token budget, and the pipeline is cached and scheduled normally
+
+#### Scenario: The knob on a row pipeline does not affect admission
+
+- **WHEN** ADAS returns a `schedule` pipeline whose `advanced` carries `input_token_budget: 1000`
+- **THEN** the pipeline is admitted and cached exactly as it would be without the knob
+
 ### Requirement: Recurring task reconciliation
 
 For each active (`enabled: true`) pipeline the runner SHALL maintain exactly one db-scheduler recurring task
@@ -566,6 +591,11 @@ runner on 4 cannot decode the preset. Without the bump it would fail on those en
 reading an unknown preset as the default, call a route application's chat-completions endpoint. The echo
 check refuses the build as a whole instead, and nothing else is added for it.
 
+**Adding the per-pipeline `advanced.input_token_budget` raises it to 6**, on both sides in the same window.
+Under contract 6 an entry's `advanced` may carry `input_token_budget`. A runner on 5 would ignore the member and
+keep trimming a pipeline whose operator switched trimming off, or set a ceiling of its own, with nothing to say
+so. The echo check refuses that build as a whole instead, and nothing else is added for it.
+
 **No `contract` query parameter SHALL be added to the feed request, and no `contract` member SHALL be
 read from a response body.** Both would duplicate this header. The header already covers the feed and all four data-plane endpoints, and it covers responses a body member
 cannot reach — a `401`, a `403`, an unmapped-path `404` — which is the distinction that makes an absent
@@ -639,6 +669,11 @@ without meaning skew, and neither SHALL produce a verdict or change the recorded
 - **GIVEN** an ADAS echoing contract `4`
 - **WHEN** a runner built on contract `5` polls the feed
 - **THEN** the response is classified incompatible and no pipeline is admitted from it
+
+#### Scenario: The runner declares contract 6
+
+- **WHEN** the runner makes any call to ADAS
+- **THEN** the call carries `Adas-Contract-Version: 6`, and a response echoing `5` is classified incompatible
 
 ### Requirement: An incompatible ADAS stalls the runner instead of steering it
 

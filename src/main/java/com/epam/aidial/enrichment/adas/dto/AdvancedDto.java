@@ -17,10 +17,15 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * @param rowsPerCall    how many rows the runner evaluates per work item (was {@code batch_chunk})
  * @param rateRpm        per-pipeline model-call ceiling per minute — moved location, not meaning
  * @param sampleFraction fraction of eligible keys to evaluate, in (0, 1] (was {@code sampling})
+ * @param inputTokenBudget approximate token ceiling on a group's assembled input: {@code 0} switches the runner's
+ *                       trimming off for this pipeline, a positive value is its own ceiling, and absence means
+ *                       {@code group.input-token-budget}. Read only on the group lane, the only lane with an input
+ *                       budget
  */
 public record AdvancedDto(
         @JsonProperty("rows_per_scan") Integer rowsPerScan,
         @JsonProperty("rows_per_call") Integer rowsPerCall,
         @JsonProperty("rate_rpm") Integer rateRpm,
-        @JsonProperty("sample_fraction") Double sampleFraction) {
+        @JsonProperty("sample_fraction") Double sampleFraction,
+        @JsonProperty("input_token_budget") Integer inputTokenBudget) {
 }

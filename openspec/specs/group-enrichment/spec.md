@@ -446,7 +446,8 @@ or an ordering in the request.
 
 ### Requirement: Bounded group input
 
-The runner SHALL apply its own token budget to the assembled input on top of ADAS's caps, dropping the
+The runner SHALL apply the pipeline's input token budget (see *The input token budget is chosen per pipeline*)
+to the assembled input on top of ADAS's caps, dropping the
 **oldest** members first and truncating per member only when dropping whole members still does not fit —
 members arrive in ascending source order, so the newest are the most likely to bear on the label. A per-member
 cut SHALL keep the field's **tail**, SHALL apply to a field of any type, and SHALL be marked in the value
@@ -542,6 +543,72 @@ judgement has been formed.
 - **GIVEN** a group whose input was not trimmed and the same `transform` template
 - **WHEN** the work item executes
 - **THEN** the caveat renders as nothing and the prompt reads as though it were not there
+
+#### Scenario: A pipeline whose budget is off is not trimmed by the runner
+
+- **GIVEN** a group pipeline whose resolved input token budget is `0`, and a group whose assembled input is
+  larger than `group.input-token-budget`
+- **WHEN** the work item executes
+- **THEN** every member ADAS returned is passed to the transform with its content intact, no member is
+  reported omitted or cut, and the content-cut count does not move
+
+#### Scenario: ADAS truncation still reaches a pipeline whose budget is off
+
+- **GIVEN** a group pipeline whose resolved input token budget is `0`, and a `group-rows` response reporting
+  `truncated=true`
+- **WHEN** the work item executes
+- **THEN** the template inputs carry `members_truncated` true, `members_omitted` 0 and a non-empty
+  `members_notice`, and the row is recorded as truncated
+
+### Requirement: The input token budget is chosen per pipeline
+
+The runner SHALL resolve each group pipeline's input token budget from the pipeline's own
+`advanced.input_token_budget`, falling back to the runner's `group.input-token-budget`:
+
+- a declared `advanced.input_token_budget` of `0` or more SHALL be the budget; `0` means the runner does not
+  trim;
+- when it is absent, the budget SHALL be `group.input-token-budget`.
+
+The resolution SHALL NOT depend on `transform.preset`. Whether the runner's estimate should bound a group is a
+property of what receives it, and the preset does not say that. A `dial_app_route` application that tokenizes
+properly and chooses what to keep is better served untrimmed, and its pipeline opts out with `0`. An application
+that forwards the group to a model without managing its size needs the guard as much as a `chat_completion` call
+does. Only the pipeline author knows which kind it is. One default also means a pipeline that declares nothing
+keeps the input it had before the knob existed.
+
+A negative `advanced.input_token_budget` SHALL be read as absent, falling back to `group.input-token-budget`, and
+SHALL be logged at most once per pipeline generation. ADAS validates the knob, so a negative value is a producer
+defect. Reading it as `0` would silently drop the guard, and refusing the pipeline would stop it over a knob that
+bounds only its input size.
+
+The budget SHALL apply to the group lane only. The row lane and the Class-1 lane have no input budget, and the runner
+SHALL ignore the knob on them rather than refusing the pipeline.
+
+#### Scenario: A pipeline without the knob uses the runner default under either preset
+
+- **GIVEN** a `chat_completion` group pipeline and a `dial_app_route` group pipeline, neither declaring
+  `advanced.input_token_budget`
+- **WHEN** their budgets are resolved
+- **THEN** both budgets are `group.input-token-budget`
+
+#### Scenario: An app-route pipeline declaring zero is not trimmed
+
+- **GIVEN** a `dial_app_route` group pipeline declaring `advanced.input_token_budget: 0`, and a group whose
+  assembled input exceeds `group.input-token-budget`
+- **WHEN** the work item executes
+- **THEN** the runner drops and cuts nothing, and the application receives every member ADAS returned
+
+#### Scenario: A declared budget overrides the default
+
+- **GIVEN** a group pipeline declaring `advanced.input_token_budget: 1000`
+- **WHEN** its budget is resolved
+- **THEN** the budget is `1000`, whatever `group.input-token-budget` is
+
+#### Scenario: A negative budget falls back to the runner default
+
+- **GIVEN** a `chat_completion` group pipeline declaring `advanced.input_token_budget: -1`
+- **WHEN** its budget is resolved
+- **THEN** the budget is `group.input-token-budget`, and the fallback is logged once for that generation
 
 ### Requirement: One enrichment row per group with group provenance
 
@@ -770,13 +837,15 @@ which carries no version guard, so it lands if and only if the row exists — is
 ### Requirement: Content cut to fit the budget is observable
 
 The runner SHALL count every group input whose remaining member had its own content cut to fit the token
-budget, separately from the row's `truncated` provenance.
+budget, separately from the row's `truncated` provenance, and SHALL attribute each count to the pipeline whose
+budget made the cut. Budgets differ per pipeline, so a runner-wide count cannot show which pipeline's budget is
+too tight.
 
 The two answer different questions and only one of them is about the budget. `truncated` is set by any
 narrowing, the pipeline's own member-selection policy included, so on a pipeline that selects one member per group it
 is true almost always and says nothing about whether content was lost. The cut count rises only when content
 the model would otherwise have seen was removed, which makes it the measurement — rather than a log grep —
-that any change to `group.input-token-budget` has to be argued from.
+that any change to a pipeline's `advanced.input_token_budget`, or to `group.input-token-budget`, has to be argued from.
 
 #### Scenario: A budget cut is counted, a policy-narrowed group is not
 
@@ -785,6 +854,12 @@ that any change to `group.input-token-budget` has to be argued from.
 - **WHEN** the work items execute
 - **THEN** only the cut member's evaluation increments the content-cut count, while both are recorded
   truncated
+
+#### Scenario: A cut is attributed to its pipeline
+
+- **GIVEN** two group pipelines, one of which cuts a member to fit its budget
+- **WHEN** the work items execute
+- **THEN** the content-cut count rises for that pipeline only
 
 ### Requirement: Ceiling-blocked groups are observable
 
@@ -797,4 +872,3 @@ that has broken.
 
 - **WHEN** a sweep pass declines groups because they are at their ceiling
 - **THEN** the number declined is published for scraping
-
