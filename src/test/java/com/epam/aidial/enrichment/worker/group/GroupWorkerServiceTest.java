@@ -499,7 +499,7 @@ class GroupWorkerServiceTest {
 
         worker.process("item-1", payload());
 
-        verify(runnerMetrics).recordInputBudgetCut();
+        verify(runnerMetrics).recordInputBudgetCut(PIPELINE_NAME);
     }
 
     @Test
@@ -515,7 +515,7 @@ class GroupWorkerServiceTest {
 
         worker.process("item-1", payload());
 
-        verify(runnerMetrics, never()).recordInputBudgetCut();
+        verify(runnerMetrics, never()).recordInputBudgetCut(anyString());
     }
 
     private void stubAssembly(boolean truncated) {

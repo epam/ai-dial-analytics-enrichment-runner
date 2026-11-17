@@ -164,4 +164,9 @@ public record PipelineDto(
     public Double sampleFraction() {
         return advanced == null ? null : advanced.sampleFraction();
     }
+
+    /** The group input token budget this pipeline declares, or null to use the configured default. */
+    public Integer inputTokenBudget() {
+        return advanced == null ? null : advanced.inputTokenBudget();
+    }
 }

@@ -193,8 +193,8 @@ public class GroupWorkerService {
             // Counted separately from `truncated`, which a pipeline's own member-selection policy sets on every
             // narrowed group and which therefore says nothing about the budget. This counts only the case
             // where content the model would otherwise have seen was removed — the one measurement a change
-            // to group.input-token-budget can be argued from.
-            runnerMetrics.recordInputBudgetCut();
+            // to a pipeline's input token budget can be argued from.
+            runnerMetrics.recordInputBudgetCut(payload.getPipelineName());
         }
         TransformDto transform = pipeline.transform();
         Map<String, Object> writeRow;

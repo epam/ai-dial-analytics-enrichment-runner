@@ -158,23 +158,7 @@ class GroupWorkerIntegrationTest {
      */
     @Test
     void appRouteGroupSendsStructuredMembersAndMapsTheReply() {
-        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, TestPipelines.builder(PIPELINE_NAME)
-                .generation(3)
-                .triggerKind(TriggerKind.GROUP)
-                .groupBy("chat_id")
-                .grainKey("chat_id")
-                .readyWhen(new ReadyWhenDto(null, "10m", null, null))
-                .model("insights-app")
-                .appRoute("insights")
-                .requestTemplate("{\"members\": {{members:json}}}")
-                .responseSchema(Map.of(
-                        "type", "object",
-                        "required", List.of("topic"),
-                        "additionalProperties", false,
-                        "properties", Map.of("topic", Map.of("type", "string"))))
-                .transformInputs(TestPipelines.columnVar("text", "request_body"))
-                .outputs(List.of(new OutputDto("topic", "topic", null, "summary.topic")))
-                .build()));
+        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, appRoutePipeline(null)));
         stubMembers(false, "hi there", "any update?");
         String routePath = "/v1/deployments/insights-app/route/insights";
         BACKEND.stubFor(post(urlPathEqualTo(routePath)).willReturn(okJson(
@@ -193,6 +177,56 @@ class GroupWorkerIntegrationTest {
         assertThat((List<?>) sent.get("members")).hasSize(2)
                 .allSatisfy(member -> assertThat(member).isInstanceOf(Map.class));
         assertThat(upsertedRow()).containsEntry("topic", "billing").containsEntry("model", "insights-app");
+    }
+
+    /**
+     * An app-route pipeline that opts out of the runner's trimming with {@code advanced.input_token_budget: 0}:
+     * a group far over the runner default reaches the application whole, and the row is not marked truncated,
+     * because nothing — neither the runner nor ADAS — narrowed it.
+     */
+    @Test
+    void appRouteGroupDeclaringZeroBudgetReachesTheRouteUntrimmed() {
+        pipelineCache.replaceAll(Map.of(PIPELINE_NAME, appRoutePipeline(0)));
+        // Two members of ~150k characters each: over the 60k-token default at four characters per token.
+        String older = "a".repeat(150_000);
+        String newer = "b".repeat(150_000);
+        stubMembers(false, older, newer);
+        String routePath = "/v1/deployments/insights-app/route/insights";
+        BACKEND.stubFor(post(urlPathEqualTo(routePath)).willReturn(okJson(
+                "{\"summary\":{\"topic\":\"billing\"}}")));
+        stubRows();
+
+        worker.process("item-1", payload());
+        drainWrites();
+
+        Map<String, Object> sent = jsonMapper.readValue(
+                BACKEND.findAll(postRequestedFor(urlPathEqualTo(routePath))).getFirst().getBodyAsString(),
+                new TypeReference<Map<String, Object>>() { });
+        assertThat((List<?>) sent.get("members")).extracting(member -> (Object) ((Map<?, ?>) member).get("text"))
+                .containsExactly(older, newer);
+        assertThat(upsertedRow()).containsEntry("truncated", false);
+        assertThat(computedTruncated()).isFalse();
+    }
+
+    private static PipelineDto appRoutePipeline(Integer inputTokenBudget) {
+        return TestPipelines.builder(PIPELINE_NAME)
+                .generation(3)
+                .triggerKind(TriggerKind.GROUP)
+                .groupBy("chat_id")
+                .grainKey("chat_id")
+                .readyWhen(new ReadyWhenDto(null, "10m", null, null))
+                .model("insights-app")
+                .appRoute("insights")
+                .requestTemplate("{\"members\": {{members:json}}}")
+                .responseSchema(Map.of(
+                        "type", "object",
+                        "required", List.of("topic"),
+                        "additionalProperties", false,
+                        "properties", Map.of("topic", Map.of("type", "string"))))
+                .transformInputs(TestPipelines.columnVar("text", "request_body"))
+                .outputs(List.of(new OutputDto("topic", "topic", null, "summary.topic")))
+                .inputTokenBudget(inputTokenBudget)
+                .build();
     }
 
     @Test

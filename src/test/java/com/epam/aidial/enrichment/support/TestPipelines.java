@@ -115,6 +115,7 @@ public final class TestPipelines {
         private TransformDto transformOverride;
         private boolean transformOverridden;
         private Integer rowsPerCall = 25;
+        private Integer inputTokenBudget;
         private TransformType transformType = TransformType.LLM;
         private String model = "gpt-4o";
         private String requestTemplate = "{\"messages\":[]}";
@@ -159,6 +160,12 @@ public final class TestPipelines {
 
         public Builder rowsPerCall(Integer rowsPerCall) {
             this.rowsPerCall = rowsPerCall;
+            return this;
+        }
+
+        /** The pipeline's own {@code advanced.input_token_budget}; null (the default) declares none. */
+        public Builder inputTokenBudget(Integer inputTokenBudget) {
+            this.inputTokenBudget = inputTokenBudget;
             return this;
         }
 
@@ -255,7 +262,7 @@ public final class TestPipelines {
                     sql ? null : requestTemplate,
                     sql || transformInputs == null ? null : new LinkedHashMap<>(transformInputs),
                     null, sql ? null : route);
-            AdvancedDto advanced = new AdvancedDto(1000, rowsPerCall, 60, sampleFraction);
+            AdvancedDto advanced = new AdvancedDto(1000, rowsPerCall, 60, sampleFraction, inputTokenBudget);
             return new PipelineDto(
                     name, transform, sql ? null : responseSchema, grainKey, versionColumn,
                     new TriggerDto(triggerKind, triggerKind == TriggerKind.SCHEDULE ? triggerCron : null, groupBy, readyWhen),

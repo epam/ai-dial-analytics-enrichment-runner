@@ -74,7 +74,7 @@ class FeedShapeTest {
               "grain_key":"event_id",
               "version_column":"_ingested_at",
               "outputs":[{"name":"sentiment","column":"sentiment_label","jsonata":null}],
-              "advanced":{"rows_per_scan":1000,"rows_per_call":25,"rate_rpm":60,"sample_fraction":0.5},
+              "advanced":{"rows_per_scan":1000,"rows_per_call":25,"rate_rpm":60,"sample_fraction":0.5,"input_token_budget":0},
               "trigger":{"kind":"schedule","cron":"10 * * * * *"},
               "enabled":true,
               "generation":17,
@@ -170,6 +170,8 @@ class FeedShapeTest {
         assertThat(pipeline.rowsPerCall()).isEqualTo(25);
         assertThat(pipeline.rateRpm()).isEqualTo(60);
         assertThat(pipeline.sampleFraction()).isEqualTo(0.5);
+        // 0 is a value, not an absence: it switches the runner's trimming off, so it must not read as null.
+        assertThat(pipeline.inputTokenBudget()).isZero();
     }
 
     @Test
@@ -257,14 +259,15 @@ class FeedShapeTest {
     }
 
     /**
-     * Contract 3 retired {@code advanced.scan_every}: the knobs are exactly four, and none of them is a clock. The
-     * record's components are pinned so a fifth member cannot creep back without this test being edited.
+     * Contract 3 retired {@code advanced.scan_every}, and contract 6 added {@code input_token_budget}: the knobs are
+     * exactly five, and none of them is a clock. The record's components are pinned so a sixth member cannot creep
+     * in without this test being edited.
      */
     @Test
-    void advancedCarriesFourKnobsAndNoScanClock() {
+    void advancedCarriesFiveKnobsAndNoScanClock() {
         assertThat(AdvancedDto.class.getRecordComponents())
                 .extracting(RecordComponent::getName)
-                .containsExactly("rowsPerScan", "rowsPerCall", "rateRpm", "sampleFraction");
+                .containsExactly("rowsPerScan", "rowsPerCall", "rateRpm", "sampleFraction", "inputTokenBudget");
     }
 
     /**

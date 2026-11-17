@@ -297,6 +297,61 @@ class GroupInputAssemblerTest {
     }
 
     @Test
+    void pipelineWithoutTheKnobIsTrimmedByTheRunnerDefault() {
+        List<Map<String, Object>> rows = List.of(member("user", "x".repeat(400)), member("user", "y".repeat(400)));
+
+        GroupInputAssembler.AssembledInput input = assembler(150).assemble(groupPipeline(null, false), rows, false);
+
+        assertThat(input.truncated()).isTrue();
+        assertThat(input.omitted()).isEqualTo(1);
+    }
+
+    /** The opt-out the knob exists for: an application that manages its own input gets every member intact. */
+    @Test
+    void pipelineDeclaringZeroIsNotTrimmedWhateverTheDefault() {
+        List<Map<String, Object>> rows = List.of(member("user", "x".repeat(400)), member("user", "y".repeat(400)));
+
+        GroupInputAssembler.AssembledInput input = assembler(150).assemble(groupPipeline(0, true), rows, false);
+
+        assertThat(input.truncated()).isFalse();
+        assertThat(input.itemsCut()).isFalse();
+        assertThat(input.members()).hasSize(2)
+                .allSatisfy(m -> assertThat(((String) m.get("text"))).hasSize(400));
+    }
+
+    @Test
+    void declaredBudgetOverridesTheDefault() {
+        List<Map<String, Object>> rows = List.of(member("user", "x".repeat(400)), member("user", "y".repeat(400)));
+
+        // The runner default would let both through; the pipeline's own ceiling does not.
+        GroupInputAssembler.AssembledInput input = assembler(60_000).assemble(groupPipeline(150, true), rows, false);
+
+        assertThat(input.truncated()).isTrue();
+        assertThat(input.omitted()).isEqualTo(1);
+    }
+
+    /** Switching the runner's trimming off must not hide ADAS's: the caveat still says the view is partial. */
+    @Test
+    void adasTruncationStillDeclaresItselfWhenTheBudgetIsOff() {
+        GroupInputAssembler.AssembledInput input = assembler(60_000)
+                .assemble(groupPipeline(0, true), List.of(member("user", "hi")), true);
+
+        assertThat(input.asInputs())
+                .containsEntry(GroupInputAssembler.TRUNCATED_VAR, true)
+                .containsEntry(GroupInputAssembler.OMITTED_VAR, 0);
+        assertThat((String) input.asInputs().get(GroupInputAssembler.NOTICE_VAR)).contains("partial view");
+    }
+
+    @Test
+    void negativeBudgetFallsBackToTheDefault() {
+        List<Map<String, Object>> rows = List.of(member("user", "x".repeat(400)), member("user", "y".repeat(400)));
+
+        GroupInputAssembler.AssembledInput input = assembler(150).assemble(groupPipeline(-1, false), rows, false);
+
+        assertThat(input.omitted()).isEqualTo(1);
+    }
+
+    @Test
     void unmappableMemberFailsTheWholeGroup() {
         // A group is 1:0..1, so there is no "skip this member" outcome — the group dead-letters instead.
         PipelineDto jsonataPipeline = groupPipeline(Map.of("text", new VarDto(null, "$bad(")));
@@ -329,6 +384,17 @@ class GroupInputAssemblerTest {
                 .readyWhen(new ReadyWhenDto(null, "10m", null, null))
                 .transformInputs(vars)
                 .build();
+    }
+
+    private static PipelineDto groupPipeline(Integer inputTokenBudget, boolean appRoute) {
+        TestPipelines.Builder builder = TestPipelines.builder("g1")
+                .triggerKind(TriggerKind.GROUP)
+                .groupBy("chat_id")
+                .grainKey("chat_id")
+                .readyWhen(new ReadyWhenDto(null, "10m", null, null))
+                .transformInputs(roleThenTextVars())
+                .inputTokenBudget(inputTokenBudget);
+        return (appRoute ? builder.appRoute("insights") : builder).build();
     }
 
     private static Map<String, Object> member(String kind, String body) {

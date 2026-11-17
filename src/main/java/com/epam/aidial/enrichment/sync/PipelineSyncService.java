@@ -121,6 +121,9 @@ public class PipelineSyncService {
      */
     private final Map<String, Long> shortIdleGenerations = new HashMap<>();
 
+    /** Last generation per group pipeline warned for a negative {@code advanced.input_token_budget}; same idiom. */
+    private final Map<String, Long> negativeBudgetGenerations = new HashMap<>();
+
     /** How many mark-scan cadences a group pipeline's idle window must span before admission stops warning. */
     static final int MIN_IDLE_CADENCES = 2;
 
@@ -412,11 +415,13 @@ public class PipelineSyncService {
         Map<String, PipelineDto> desired = new LinkedHashMap<>();
         Map<String, Long> refused = new HashMap<>();
         Map<String, Long> shortIdle = new HashMap<>();
+        Map<String, Long> negativeBudget = new HashMap<>();
         for (PipelineDto pipeline : pipelines) {
             String reason = PipelineRouting.unsupportedReason(pipeline);
             if (reason == null) {
                 desired.put(pipeline.name(), pipeline);
                 warnOnShortIdle(pipeline, shortIdle);
+                warnOnNegativeInputBudget(pipeline, negativeBudget);
                 continue;
             }
             refused.put(pipeline.name(), pipeline.generation());
@@ -428,6 +433,8 @@ public class PipelineSyncService {
         refusedGenerations.putAll(refused);
         shortIdleGenerations.keySet().retainAll(shortIdle.keySet());
         shortIdleGenerations.putAll(shortIdle);
+        negativeBudgetGenerations.keySet().retainAll(negativeBudget.keySet());
+        negativeBudgetGenerations.putAll(negativeBudget);
         runnerMetrics.setUnsupportedPipelines(refused.size());
         return desired;
     }
@@ -460,6 +467,25 @@ public class PipelineSyncService {
                             + "group can look idle and be evaluated early, then again. Lower GROUP_SCAN_CADENCE",
                     pipeline.name(), pipeline.generation(), HumanDuration.format(idle), MIN_IDLE_CADENCES,
                     HumanDuration.format(groupProperties.scanCadence()));
+        }
+    }
+
+    /**
+     * Warns, once per generation, when an admitted group pipeline declares a negative {@code advanced.input_token_budget}.
+     * ADAS refuses one, so it is a producer defect; the worker reads it as absent (see
+     * {@link GroupProperties#resolveInputTokenBudget}) rather than refusing a pipeline over a knob that bounds only its
+     * input size. Reported here, where generations are already compared, rather than on every group evaluation.
+     */
+    private void warnOnNegativeInputBudget(PipelineDto pipeline, Map<String, Long> negativeBudget) {
+        Integer declared = pipeline.inputTokenBudget();
+        if (!PipelineRouting.isGroup(pipeline) || declared == null || declared >= 0) {
+            return;
+        }
+        negativeBudget.put(pipeline.name(), pipeline.generation());
+        if (!Objects.equals(negativeBudgetGenerations.get(pipeline.name()), pipeline.generation())) {
+            log.warn("Group pipeline {} (generation {}) declares a negative advanced.input_token_budget ({}); using "
+                    + "group.input-token-budget ({}) instead", pipeline.name(), pipeline.generation(), declared,
+                    groupProperties.inputTokenBudget());
         }
     }
 

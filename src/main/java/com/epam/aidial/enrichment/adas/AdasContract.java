@@ -50,8 +50,13 @@ public final class AdasContract {
      * <p><b>5 since ADAS added the {@code dial_app_route} transform preset.</b> An entry's {@code transform.preset}
      * may then be {@code dial_app_route}, carrying {@code route}, and its outputs an optional {@code source}. A build
      * speaking 4 cannot decode the preset; the bump refuses it as a whole rather than entry by entry.
+     *
+     * <p><b>6 since ADAS added {@code advanced.input_token_budget}.</b> An entry's {@code advanced} may then carry
+     * a per-pipeline group input budget, {@code 0} switching the runner's trimming off. A build speaking 5 would
+     * ignore the member and keep trimming a pipeline its operator opted out, with nothing to say so; the bump
+     * refuses it as a whole instead.
      */
-    public static final int VERSION = 5;
+    public static final int VERSION = 6;
 
     /** {@link #VERSION} on the wire, resolved once so the header value and the comparison cannot disagree. */
     public static final String VERSION_VALUE = Integer.toString(VERSION);
