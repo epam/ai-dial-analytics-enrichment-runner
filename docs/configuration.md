@@ -149,6 +149,9 @@ The first four variables compose `spring.datasource.url`
 (`jdbc:postgresql://${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DATABASE}?${POSTGRES_OPS}`) rather
 than binding one-to-one.
 
+To run on Cloud SQL for PostgreSQL with IAM database authentication, put the Cloud SQL Java Connector's
+parameters in `POSTGRES_OPS`. See [`cloud-sql-access.md`](cloud-sql-access.md).
+
 | Variable                       | Property                             | Default     | Required | Description                                                                                                                            |
 |--------------------------------|--------------------------------------|-------------|----------|----------------------------------------------------------------------------------------------------------------------------------------|
 | `POSTGRES_HOST`                | _(composes `spring.datasource.url`)_ | `localhost` | Yes      | PostgreSQL host.                                                                                                                       |

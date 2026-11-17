@@ -139,6 +139,15 @@ margin, so a few minutes per table — materialize and row writes to it answer `
 The runner treats a `503` as transient and retries from its committed cursor, so this shows as a few failed
 Class-1 ticks (WARN lines and `runner.class1.tick.failures` increments) per table and then clears by itself.
 
+### The runtime-state database can run on Cloud SQL
+
+The runner ships the Cloud SQL Java Connector, as ADAS does for its catalog, so its PostgreSQL database can live
+on a Cloud SQL for PostgreSQL instance with IAM database authentication and no password. It is opt-in: the
+connector loads only when `POSTGRES_OPS` carries its parameters (`cloudSqlInstance`, `enableIamAuth=true`,
+`socketFactory=com.google.cloud.sql.postgres.SocketFactory`), and a plain PostgreSQL URL connects as before.
+Switching an existing database to an IAM user needs its tables handed over first, or the next startup's migration
+fails. The connection, credentials and grants are in [`cloud-sql-access.md`](cloud-sql-access.md).
+
 ---
 
 ## 4. If the deploy goes out of order
@@ -168,7 +177,8 @@ Added, optional, with a default that applies the closure in §2:
 |---------------------------------|---------|------------------------------------------------------------------------|
 | `DISABLE_SWAGGER_AUTHORIZATION` | `false` | `true` serves the API description without a credential in `oidc` mode. |
 
-Nothing is removed. Descriptions are in [`configuration.md`](configuration.md).
+Nothing is removed. Descriptions are in [`configuration.md`](configuration.md). Cloud SQL (§3) needs no new
+variable: its parameters go in the existing `POSTGRES_OPS`.
 
 ### Probes
 

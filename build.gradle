@@ -57,6 +57,14 @@ dependencies {
     // PostgreSQL, so Boot's Flyway autoconfig fails with "Unsupported Database: PostgreSQL" without
     // this. BOM-managed (Spring Boot 4 -> Flyway 11.x), kept in lockstep with flyway-core.
     runtimeOnly 'org.flywaydb:flyway-database-postgresql'
+    // Cloud SQL connector (IAM auth), loaded only when POSTGRES_OPS selects it; see docs/cloud-sql-access.md.
+    // grpc-bom keeps its io.grpc modules on one release; the Apache transport it never uses is excluded.
+    runtimeOnly platform('io.grpc:grpc-bom:1.84.2')
+    runtimeOnly('com.google.cloud.sql:postgres-socket-factory:1.30.2') {
+        exclude group: 'org.apache.httpcomponents', module: 'httpclient'
+        exclude group: 'org.apache.httpcomponents', module: 'httpcore'
+        exclude group: 'com.google.http-client', module: 'google-http-client-apache-v2'
+    }
 
     implementation('org.springframework.boot:spring-boot-starter-log4j2') {
         exclude group: 'org.apache.logging.log4j'
