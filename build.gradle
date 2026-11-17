@@ -58,7 +58,9 @@ dependencies {
     // this. BOM-managed (Spring Boot 4 -> Flyway 11.x), kept in lockstep with flyway-core.
     runtimeOnly 'org.flywaydb:flyway-database-postgresql'
     // Cloud SQL connector (IAM auth), loaded only when POSTGRES_OPS selects it; see docs/cloud-sql-access.md.
-    // grpc-bom keeps its io.grpc modules on one release; the Apache transport it never uses is excluded.
+    // Its Connector builds a gRPC data client unconditionally, so the gRPC/gax stack it brings cannot be excluded;
+    // grpc-bom holds those io.grpc modules on one release (some arrive requested at older ones). The Apache
+    // transport is excluded: the connector calls the Cloud SQL Admin API over NetHttpTransport only.
     runtimeOnly platform('io.grpc:grpc-bom:1.84.2')
     runtimeOnly('com.google.cloud.sql:postgres-socket-factory:1.30.2') {
         exclude group: 'org.apache.httpcomponents', module: 'httpclient'

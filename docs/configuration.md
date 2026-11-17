@@ -157,9 +157,9 @@ parameters in `POSTGRES_OPS`. See [`cloud-sql-access.md`](cloud-sql-access.md).
 | `POSTGRES_HOST`                | _(composes `spring.datasource.url`)_ | `localhost` | Yes      | PostgreSQL host.                                                                                                                       |
 | `POSTGRES_PORT`                | _(composes `spring.datasource.url`)_ | `5432`      | No       | PostgreSQL port.                                                                                                                       |
 | `POSTGRES_DATABASE`            | _(composes `spring.datasource.url`)_ | `testdb`    | Yes      | Database name.                                                                                                                         |
-| `POSTGRES_OPS`                 | _(composes `spring.datasource.url`)_ | _(empty)_   | No       | Extra JDBC query options appended after `?`, e.g. `sslmode=require`.                                                                   |
+| `POSTGRES_OPS`                 | _(composes `spring.datasource.url`)_ | _(empty)_   | No       | Extra JDBC query options appended after `?`, e.g. `sslmode=require`, or the Cloud SQL connector's parameters.                          |
 | `POSTGRES_DATASOURCE_USERNAME` | `spring.datasource.username`         | `postgres`  | Yes      | Datasource user. Needs DDL on its own schema when migrations are enabled.                                                              |
-| `POSTGRES_DATASOURCE_PASSWORD` | `spring.datasource.password`         | `postgres`  | Yes      | Password for that user. Supply from the deployment's secret store.                                                                     |
+| `POSTGRES_DATASOURCE_PASSWORD` | `spring.datasource.password`         | `postgres`  | Yes      | Password for that user. Supply from the deployment's secret store. Ignored under Cloud SQL IAM auth, but must not be empty.            |
 | `POSTGRES_MIGRATIONS_ENABLED`  | `spring.flyway.enabled`              | `true`      | No       | Run the Flyway migrations under `classpath:db/migration/postgres` at startup. Disable only when the schema is provisioned out of band. |
 
 ### Job scheduler (db-scheduler)
