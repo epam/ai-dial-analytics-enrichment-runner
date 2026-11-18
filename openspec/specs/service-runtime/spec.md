@@ -167,6 +167,28 @@ and SHALL NOT overwrite it.
 - **WHEN** the migration is applied
 - **THEN** those items report no run, which means the live path — what every one of them was
 
+### Requirement: Cloud SQL connectivity
+
+The runtime-state datasource SHALL be able to reach a Cloud SQL for PostgreSQL instance through the Cloud SQL
+Java Connector shipped on the runtime classpath, with IAM database authentication as the principal of
+Application Default Credentials. The connector SHALL be selected only by its own parameters in the JDBC URL
+(carried in `POSTGRES_OPS`, or in a whole `SPRING_DATASOURCE_URL`), with no dedicated property and no reference
+from production code, so a plain PostgreSQL URL never loads it. Every `io.grpc` module the connector brings SHALL
+resolve to one release.
+
+#### Scenario: An IAM-authenticated Cloud SQL URL is handled by the connector
+
+- **WHEN** the datasource URL carries `cloudSqlInstance`, `enableIamAuth=true` and
+  `socketFactory=com.google.cloud.sql.postgres.SocketFactory`
+- **THEN** the connector calls the Cloud SQL Admin API for that instance with the credential's token, requests
+  its ephemeral certificate with an IAM login-scoped token, and any failure surfaces as an ordinary
+  `SQLException`, never a class-linkage error
+
+#### Scenario: A plain PostgreSQL URL is unaffected
+
+- **WHEN** the datasource URL carries none of the connector's parameters
+- **THEN** the driver connects directly to `POSTGRES_HOST:POSTGRES_PORT` and the connector is never loaded
+
 ### Requirement: Stable error contract
 
 Every endpoint SHALL return failures as the stable `ErrorView` JSON shape

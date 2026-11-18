@@ -130,6 +130,7 @@ Health probes and the Prometheus endpoint stay public in every mode. See
 | [Configuration](docs/configuration.md)                | Every variable, health probes, and release order         |
 | [End-to-end runbook](docs/e2e-runbook.md)             | Running all three lanes locally against ADAS             |
 | [Kubernetes exposure](docs/kubernetes-exposure.md)    | Endpoint allowlist, ingress and network policy           |
+| [Cloud SQL access](docs/cloud-sql-access.md)          | Runtime-state database on Cloud SQL with IAM auth        |
 | Upgrade guides (`docs/release-<version>-upgrade.md`)  | Operator steps for each release                          |
 | [Specs](openspec/specs)                               | Detailed behavior of each capability                     |
 
