@@ -3,7 +3,7 @@
 How to move a runner from **0.3** to **0.23.0**. A runner on an older build first follows
 [`release-0.3-upgrade.md`](release-0.3-upgrade.md) to 0.3.
 
-The runner moves as a pair with **ADAS 0.23.0**. Follow ADAS's own `docs/release-0.23.0-upgrade.md` for its
+The runner moves as a pair with **ADAS 0.23.0**. Follow ADAS's own `docs/release-0.23-upgrade.md` for its
 side. The contract version rises from `3` to `4`, and neither build works with the other's previous
 release, so both are upgraded in one window. The main change is on ADAS: row-grain enrichments are
 **aligned** with their source's partitions. The runner's part is small: for a per-row LLM pipeline over an
@@ -11,6 +11,9 @@ aligned enrichment, ADAS's scan returns a `__partition_v` member in every row, a
 on every write-back row.
 
 The runner also closes the API description in `oidc` mode: it now needs a `FULL_ADMIN` credential (§2).
+
+**0.23.1** is a patch on 0.23.0. It lets the runtime-state database run on Cloud SQL, opt-in, and a runner
+already on 0.23.0 takes it as an ordinary redeploy (§6).
 
 ## Why 0.23.0 and not 0.4
 
@@ -176,3 +179,20 @@ Unchanged: liveness `/actuator/health/liveness`; readiness and startup `/actuato
 
 For troubleshooting the contract check, a stuck write lane or a silent pause, see
 [`e2e-runbook.md`](e2e-runbook.md).
+
+---
+
+## 6. 0.23.1
+
+0.23.1 keeps contract version `4`, adds no migration and no variable, and changes nothing for a deployment that
+keeps its `POSTGRES_*` values. It works with ADAS 0.23.0 and goes out as an ordinary redeploy, with no window and
+no scale to 0. A runner still on 0.3 follows §1 to §5 and deploys 0.23.1 in place of 0.23.0.
+
+### The runtime-state database can run on Cloud SQL
+
+The runner ships the Cloud SQL Java Connector, as ADAS does for its catalog, so its PostgreSQL database can live
+on a Cloud SQL for PostgreSQL instance with IAM database authentication and no password. It is opt-in: the
+connector loads only when `POSTGRES_OPS` carries its parameters (`cloudSqlInstance`, `enableIamAuth=true`,
+`socketFactory=com.google.cloud.sql.postgres.SocketFactory`), and a plain PostgreSQL URL connects as before.
+Switching an existing database to an IAM user needs its tables handed over first, or the next startup's migration
+fails. The connection, credentials and grants are in [`cloud-sql-access.md`](cloud-sql-access.md).
