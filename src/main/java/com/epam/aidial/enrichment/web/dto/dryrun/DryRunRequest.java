@@ -28,5 +28,8 @@ public record DryRunRequest(
     /** The members a body may carry; any other is refused with 400 rather than ignored. */
     public static final Set<String> MEMBERS = Set.of("group_key", "from", "to", "limit");
 
+    /** The most row-grain rows one dry run evaluates, as ADAS's trial input bounds them: each costs a model call. */
+    public static final int MAX_LIMIT = 5;
+
     public static final DryRunRequest EMPTY = new DryRunRequest(null, null, null, null);
 }

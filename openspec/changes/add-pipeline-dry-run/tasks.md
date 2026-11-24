@@ -17,7 +17,7 @@
 - [x] 3.1 Add `DryRunService`: per-pipeline in-flight guard, spend gate check, trial-input read, admission, row mapping via `InputMapper` or group assembly via `GroupInputAssembler`, bounded concurrent evaluation
 - [x] 3.2 Map failures to stages (`input_map`, `group_map`, `dial_call`, `validate`, `output_map`) using the workers' classification, without DLQ, upsert, stamp, charge or breaker
 - [x] 3.3 Build the response: `preview` passed through, `evaluations` with request/response capped at 64 KiB and the truncation flags
-- [x] 3.4 Add `DryRunController` `POST /v1/pipelines/{name}/try` with body validation (unknown member → 400, `limit` 1–5)
+- [x] 3.4 Add `DryRunController` `POST /v1/pipelines/{name}/try` with body validation (unknown member → 400, `limit` outside 1–5 → 422 `pipeline_validation_failed` before the ADAS read, as ADAS answers it)
 - [x] 3.5 Add `DefaultExceptionHandler` mappings: ADAS refusal passthrough (status, code, message), 409 `dry_run_in_progress`, 429 `spend_budget_exhausted`, 429 `dial_rate_limited`, 422 `pipeline_not_runnable`, 503 `adas_unavailable`, 503 `adas_contract_mismatch`
 - [x] 3.6 Log one boundary line per dry run (pipeline, outcome, attempts, latency) and no content
 

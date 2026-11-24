@@ -11,6 +11,7 @@ import com.epam.aidial.enrichment.exception.DryRunAdasRefusalException;
 import com.epam.aidial.enrichment.exception.DryRunAdasUnavailableException;
 import com.epam.aidial.enrichment.exception.DryRunBodyException;
 import com.epam.aidial.enrichment.exception.DryRunInProgressException;
+import com.epam.aidial.enrichment.exception.DryRunLimitException;
 import com.epam.aidial.enrichment.exception.ErrorMessages;
 import com.epam.aidial.enrichment.exception.InvalidCursorException;
 import com.epam.aidial.enrichment.exception.PipelineCacheNotReadyException;
@@ -194,6 +195,12 @@ public class DefaultExceptionHandler {
     @ExceptionHandler(PipelineNotRunnableException.class)
     public ErrorView handlePipelineNotRunnable(HttpServletRequest req, PipelineNotRunnableException ex) {
         return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "pipeline_not_runnable", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)
+    @ExceptionHandler(DryRunLimitException.class)
+    public ErrorView handleDryRunLimit(HttpServletRequest req, DryRunLimitException ex) {
+        return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "pipeline_validation_failed", ex.getMessage());
     }
 
     @ResponseStatus(HttpStatus.SERVICE_UNAVAILABLE)

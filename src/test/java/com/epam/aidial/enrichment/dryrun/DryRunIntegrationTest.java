@@ -546,6 +546,19 @@ class DryRunIntegrationTest {
         assertThat(BACKEND.findAll(postRequestedFor(urlPathEqualTo(TRIAL_PATH)))).isEmpty();
     }
 
+    /** Refused before the read, with the status and code ADAS's trial input gives the same body. */
+    @Test
+    void limitOutsideItsRangeIsRefusedBeforeAdasIsRead() throws Exception {
+        for (String body : List.of("{\"limit\":0}", "{\"limit\":6}", "{\"limit\":-1}")) {
+            dryRun(body)
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                    .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("between 1 and 5")));
+        }
+
+        assertThat(BACKEND.findAll(postRequestedFor(urlPathEqualTo(TRIAL_PATH)))).isEmpty();
+    }
+
     @Test
     void dryRunContentIsNeverLoggedAtAnyLevel() throws Exception {
         String secret = "member-content-that-must-not-be-logged";

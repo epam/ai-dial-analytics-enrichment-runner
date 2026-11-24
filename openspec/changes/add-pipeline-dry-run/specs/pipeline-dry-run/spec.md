@@ -6,7 +6,10 @@ The runner SHALL expose `POST /v1/pipelines/{name}/try` for `llm` enrich pipelin
 `chat_completion` or `dial_app_route`, enabled or **disabled**. The body MAY carry `group_key`, `from`, `to`
 and `limit`, and SHALL be refused with HTTP 400 `bad_request` for any other member. `group_key`, `from` and
 `to` mean what they mean on ADAS's preview. `limit` is the number of row-grain rows to evaluate, between `1`
-and `5`, defaulting to `1`.
+and `5`, defaulting to `1`. A `limit` outside that range SHALL be refused with HTTP 422
+`pipeline_validation_failed`, the answer ADAS's trial-input gives the same body, before trial-input is read. A
+`limit` on a `group` pipeline is refused by ADAS, whose refusal is passed through: only the read tells the
+runner which trigger the pipeline has.
 
 The runner SHALL obtain its input from ADAS's `POST /v1/pipelines/{name}/trial-input` with the same body, and
 SHALL evaluate what it returns:
@@ -58,6 +61,12 @@ The runner SHALL evaluate the rows of one dry run concurrently, at most `limit` 
 - **WHEN** it is tried
 - **THEN** the request is rendered and the reply validated and mapped against the declaration trial-input
   returned
+
+#### Scenario: A limit out of range is refused before ADAS is read
+
+- **WHEN** a pipeline is tried with `{"limit": 6}` or `{"limit": 0}`
+- **THEN** the response is HTTP 422 `pipeline_validation_failed`, trial-input is not called, and no DIAL call is
+  made
 
 ### Requirement: The dry run's input is read under the caller's identity
 
