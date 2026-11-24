@@ -55,8 +55,12 @@ public final class AdasContract {
      * a per-pipeline group input budget, {@code 0} switching the runner's trimming off. A build speaking 5 would
      * ignore the member and keep trimming a pipeline its operator opted out, with nothing to say so; the bump
      * refuses it as a whole instead.
+     *
+     * <p><b>7 since ADAS added {@code POST /v1/pipelines/{name}/trial-input}</b>, the read the dry run is built on.
+     * A build speaking 7 against an ADAS on 6 would meet an unmapped-path 404 it could not tell from an unknown
+     * pipeline; the bump refuses the pair as a whole instead.
      */
-    public static final int VERSION = 6;
+    public static final int VERSION = 7;
 
     /** {@link #VERSION} on the wire, resolved once so the header value and the comparison cannot disagree. */
     public static final String VERSION_VALUE = Integer.toString(VERSION);

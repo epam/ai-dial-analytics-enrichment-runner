@@ -37,11 +37,15 @@
              Overriding these (or supplying a different log4j2 configuration) re-enables body logging — a
              deployment handling sensitive data should not.
 
+             Spring MVC's response-body writer logs the body it writes at DEBUG, and the dry run's response carries
+             the rendered request, the members and the reply, so its package is pinned too.
+
              The statement loggers are pinned for the same reason: SQL text and bound values carry row content.
              Each pin is its own logger entry, so a runtime level applied to an ancestor leaves it in place; the
              runtime level file refuses anything below INFO for these names and their descendants. -->
         <Logger name="org.springframework.web.client" level="INFO"/>
         <Logger name="org.springframework.http.converter" level="INFO"/>
+        <Logger name="org.springframework.web.servlet.mvc.method.annotation" level="INFO"/>
         <Logger name="org.hibernate.SQL" level="INFO"/>
         <Logger name="org.hibernate.orm.jdbc.bind" level="INFO"/>
         <Logger name="org.springframework.jdbc.core" level="INFO"/>

@@ -17,8 +17,8 @@ import java.time.Duration;
  * application's Jackson 3 {@code JsonMapper} (case-insensitive enum reads, matching ADAS's lowercase enum
  * wire format), so the client itself needs no custom message converters.
  *
- * <p><b>One client, so one place for the handshake.</b> All five {@code adas/*Client} classes inject this
- * bean, which is why {@link AdasContractInterceptor} is registered here rather than in each of them: the
+ * <p><b>One interceptor, so one place for the handshake.</b> All five {@code adas/*Client} classes inject this
+ * bean, and the dry run's trial-input client the caller-credential twin below, which is why {@link AdasContractInterceptor} is registered here rather than in each of them: the
  * {@link AdasContract#HEADER} is then sent, and its echo verified, on every ADAS call the runner will ever
  * make — including from a client added after this was written.
  */
@@ -26,6 +26,7 @@ import java.time.Duration;
 public class AdasClientConfiguration {
 
     public static final String ADAS_REST_CLIENT = "adasRestClient";
+    public static final String ADAS_CALLER_REST_CLIENT = "adasCallerRestClient";
     public static final String API_KEY_HEADER = "Api-Key";
 
     @Bean(ADAS_REST_CLIENT)
@@ -42,5 +43,23 @@ public class AdasClientConfiguration {
             builder = builder.defaultHeader(API_KEY_HEADER, properties.apiKey());
         }
         return builder.build();
+    }
+
+    /**
+     * The same client without the service {@code Api-Key}: the dry run's trial-input read sends the credential of the
+     * person who asked for the dry run instead, so ADAS applies that person's view rather than the runner's. Kept a
+     * separate bean so no other call can lose the service credential by accident. It shares the contract interceptor,
+     * so the handshake holds on this call as on every other.
+     */
+    @Bean(ADAS_CALLER_REST_CLIENT)
+    public RestClient adasCallerRestClient(AdasProperties properties, AdasContractInterceptor contractInterceptor) {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(Duration.ofMillis(properties.connectTimeoutMs()));
+        factory.setReadTimeout(Duration.ofMillis(properties.readTimeoutMs()));
+        return RestClient.builder()
+                .baseUrl(Strings.CS.removeEnd(properties.baseUrl(), "/"))
+                .requestFactory(factory)
+                .requestInterceptor(contractInterceptor)
+                .build();
     }
 }

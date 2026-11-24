@@ -4,13 +4,15 @@ How to move a runner from **0.23.0** to **0.24**. A runner on an older build fir
 [`release-0.23.0-upgrade.md`](release-0.23.0-upgrade.md) to 0.23.0.
 
 The runner moves as a pair with **ADAS 0.24**. Follow ADAS's own `docs/release-0.24-upgrade.md` for its side.
-The contract version rises from `4` to `6`, and neither build works with the other's previous release, so both
-are upgraded in one window. Two changes raise it, and both ship in this release:
+The contract version rises from `4` to `7`, and neither build works with the other's previous release, so both
+are upgraded in one window. Three changes raise it, and all ship in this release:
 
 - **`5`: group and row pipelines may call a DIAL application route** (`preset: dial_app_route`) instead of chat
   completions (§2).
 - **`6`: a group pipeline may set its own input token budget** with `advanced.input_token_budget`. `0` switches the
   runner's trimming off for that pipeline (§3).
+- **`7`: a pipeline can be dry-run against its model or application** with `POST /v1/pipelines/{name}/try`, which
+  reads its input through ADAS's new `trial-input` (§4).
 
 No runner configuration has to change. A pipeline that uses neither feature behaves as it did on 0.23.0.
 
@@ -20,7 +22,7 @@ No runner configuration has to change. A pipeline that uses neither feature beha
 
 ### Before the window — on the old build
 
-Nothing to do. One optional key is new (§4). Its default fits most deployments.
+Nothing to do. One optional key is new (§5). Its default fits most deployments.
 
 ### The window
 
@@ -98,7 +100,27 @@ generation.
 
 ---
 
-## 4. Reference
+## 4. Dry run against the model
+
+`POST /v1/pipelines/{name}/try` takes ADAS's preview sample of an `llm` pipeline, enabled or disabled, and evaluates
+it the way a worker would: one row by default (`limit`, at most 5) or the sampled group, rendered, sent to the
+deployment or route, validated and mapped. The response is ADAS's preview plus one evaluation per row or group, with
+the request sent, the reply, the outputs, and the stage a failure would have been dead-lettered at (see
+[`pipeline-dry-run`](../openspec/specs/pipeline-dry-run/spec.md)).
+
+- **It spends.** Each call counts towards the pipeline's daily spend and is refused with `429 spend_budget_exhausted`
+  once the soft budget is reached. It takes a rate-limit permit only if one is free (`429 dial_rate_limited`
+  otherwise), and runs one at a time per pipeline (`409 dry_run_in_progress`).
+- **It writes nothing else.** No dead letter, write-back, cursor move, group stamp or breaker count.
+- **It reads as the caller.** The runner forwards the caller's `Authorization` or `Api-Key` to ADAS on this one
+  call, so ADAS's column and row restrictions and the `app-routes` allowlist apply to the caller.
+- **A proxy must allow the model call's time.** See [`kubernetes-exposure.md`](kubernetes-exposure.md#ingress).
+- **One more logger is pinned at `INFO`**: `org.springframework.web.servlet.mvc.method.annotation`, which below
+  `INFO` would log the dry run's response body. It cannot be lowered at runtime.
+
+---
+
+## 5. Reference
 
 ### Migrations
 
@@ -117,7 +139,7 @@ Added, optional:
 
 ### Contract
 
-`Adas-Contract-Version` is `6`, echoed back by ADAS. The check runs before a response is read, so a mismatched pair
+`Adas-Contract-Version` is `7`, echoed back by ADAS. The check runs before a response is read, so a mismatched pair
 never renders a template or calls a model. A runner meeting an ADAS on another version stalls: it starts no new work,
 logs `ADAS is incompatible with this build's contract version`, and `runner.adas.contract.compatible` reads `0`.
 

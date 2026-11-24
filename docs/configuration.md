@@ -72,10 +72,10 @@ In Kubernetes, mount the file from a ConfigMap as a **directory** at `/app/log-c
 sees updates — and allow about a minute for a change to arrive. `LOGGING_LEVEL_<PACKAGE>` variables still set
 static levels at startup.
 
-Not configurable: `org.springframework.web.client`, `org.springframework.http.converter`, `org.hibernate.SQL`,
-`org.hibernate.orm.jdbc.bind` and `org.springframework.jdbc.core` are pinned at `INFO`, and neither
-`APP_LOG_LEVEL` nor the level file can lower them — below `INFO` they print request bodies, which here are
-rendered prompts, and bound SQL values.
+Not configurable: `org.springframework.web.client`, `org.springframework.http.converter`,
+`org.springframework.web.servlet.mvc.method.annotation`, `org.hibernate.SQL`, `org.hibernate.orm.jdbc.bind` and
+`org.springframework.jdbc.core` are pinned at `INFO`, and neither `APP_LOG_LEVEL` nor the level file can lower them —
+below `INFO` they print request and response bodies, which here are rendered prompts, and bound SQL values.
 
 ### API documentation (springdoc / Swagger UI)
 

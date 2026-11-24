@@ -6,14 +6,17 @@ import com.epam.aidial.enrichment.adas.dto.TransformPreset;
 import com.epam.aidial.enrichment.configuration.WorkerProperties;
 import com.epam.aidial.enrichment.dial.DialRateLimiter;
 import com.epam.aidial.enrichment.dlq.DlqStage;
+import com.epam.aidial.enrichment.exception.DialRateLimitedException;
 import com.epam.aidial.enrichment.exception.ResponseValidationException;
 import com.epam.aidial.enrichment.exception.TransientChunkException;
+import com.epam.aidial.enrichment.exception.UnresolvedPlaceholderException;
 import com.epam.aidial.enrichment.observability.RunnerMetrics;
 import com.epam.aidial.enrichment.observability.RunnerTracer;
 import com.epam.aidial.enrichment.spend.SpendService;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -114,8 +117,93 @@ public class TransformInvoker {
         DialCall call = callFor(transform);
         String rendered = templateRenderer.render(transform.requestTemplate(), inputs);
         String requestBody = call.body(rendered, transform, pipeline.responseSchema());
-        String content = callWithRepair(call, pipeline, transform, requestBody);
+        String content = callWithRepair(call, pipeline, transform, requestBody, Trace.worker());
         return outputMapper.map(pipeline, parseContent(content));
+    }
+
+    /**
+     * Runs one evaluation exactly as {@link #derive} does — the same render, request body, DIAL call, corrective retry,
+     * validation and output mapping — for a dry run, and reports what happened instead of throwing it.
+     *
+     * <p>It keeps the two effects that belong to the call itself: the spend is recorded, because the money is spent,
+     * and a permanently refused call is recorded as a failure, as a worker records it. It differs from a worker's
+     * evaluation in two ways only. A rate-limit permit is taken only if one is free now, and a
+     * {@link DialRateLimitedException} is thrown when none is, so a dry run never waits behind the pipeline's own
+     * work. And a transient failure is reported rather than retried with backoff: the caller is a person waiting on
+     * the answer.
+     *
+     * <p>Dead-lettering, write-back and every other runtime state stay the caller's to leave alone.
+     *
+     * @throws DialRateLimitedException when no rate-limit permit is free for a call
+     */
+    public TrialOutcome trial(PipelineDto pipeline, TransformDto transform, Map<String, Object> inputs) {
+        DialCall call = callFor(transform);
+        Trace trace = Trace.dryRun();
+        long started = System.nanoTime();
+        try {
+            String rendered = templateRenderer.render(transform.requestTemplate(), inputs);
+            trace.request = call.body(rendered, transform, pipeline.responseSchema());
+            String content = callWithRepair(call, pipeline, transform, trace.request, trace);
+            Map<String, Object> outputs = outputMapper.map(pipeline, parseContent(content));
+            return trace.outcome(outputs, call, started, null, null, null);
+        } catch (DialRateLimitedException e) {
+            throw e;
+        } catch (UnresolvedPlaceholderException e) {
+            // Raised before any request is built, so nothing was called or charged; the worker's `input_map` stage.
+            return trace.outcome(null, call, started, DlqStage.INPUT_MAP, null, e.getMessage());
+        } catch (RestClientResponseException e) {
+            if (!RetryableStatus.isRetryable(e)) {
+                // Recorded as the worker records a permanent refusal: a failed call, no usage.
+                spendService.record(pipeline.name(), pipeline.generation(), 0, call.usageUnit(), true);
+            }
+            trace.response = e.getResponseBodyAsString();
+            return trace.outcome(null, call, started, DlqStage.DIAL_CALL, e.getStatusCode().value(), e.getMessage());
+        } catch (RestClientException e) {
+            return trace.outcome(null, call, started, DlqStage.DIAL_CALL, null, e.getMessage());
+        } catch (ResponseValidationException e) {
+            if (e.getRawResponse() != null) {
+                trace.response = e.getRawResponse();
+            }
+            return trace.outcome(null, call, started, DlqStage.VALIDATE, null, e.getMessage());
+        } catch (RuntimeException e) {
+            // OutputMappingException, and what the worker files with it: a request that could not be built, a reply
+            // that could not be mapped.
+            return trace.outcome(null, call, started, DlqStage.OUTPUT_MAP, null, e.getMessage());
+        }
+    }
+
+    /**
+     * What one evaluation's calls did, for a dry run to report: whether a call may wait for a rate-limit permit, the
+     * first request body, the last raw reply, the calls made and the usage they reported, and the last validation
+     * errors. A worker's evaluation keeps one too, and reads nothing from it but {@link #waits}.
+     */
+    private static final class Trace {
+
+        private final boolean waits;
+        private String request;
+        private String response;
+        private int attempts;
+        private long usage;
+        private List<String> errors = List.of();
+
+        private Trace(boolean waits) {
+            this.waits = waits;
+        }
+
+        static Trace worker() {
+            return new Trace(true);
+        }
+
+        static Trace dryRun() {
+            return new Trace(false);
+        }
+
+        TrialOutcome outcome(Map<String, Object> outputs, DialCall call, long startedNanos, DlqStage stage,
+                             Integer dialStatus, String message) {
+            long latencyMs = (System.nanoTime() - startedNanos) / 1_000_000;
+            return new TrialOutcome(outputs, request, response, attempts, usage, call.usageUnit(), latencyMs, stage,
+                    dialStatus, message, stage == DlqStage.VALIDATE ? List.copyOf(errors) : List.of());
+        }
     }
 
     /** The call for the transform's preset; an absent preset is a chat completion, as ADAS defaults it. */
@@ -123,30 +211,38 @@ public class TransformInvoker {
         return calls.get(transform.preset() == null ? TransformPreset.CHAT_COMPLETION : transform.preset());
     }
 
-    private String callWithRepair(DialCall call, PipelineDto pipeline, TransformDto transform, String requestBody) {
+    private String callWithRepair(DialCall call, PipelineDto pipeline, TransformDto transform, String requestBody,
+                                  Trace trace) {
         Map<String, Object> responseSchema = pipeline.responseSchema();
         String currentBody = requestBody;
-        DialCall.Reply reply = invoke(call, pipeline, transform, currentBody);
+        DialCall.Reply reply = invoke(call, pipeline, transform, currentBody, trace);
         List<String> errors = responseValidator.validate(responseSchema, reply.output());
 
         int repairs = 0;
         while (!errors.isEmpty() && call.repairs() && repairs < workerProperties.repairRetries()) {
             currentBody = call.withCorrection(currentBody, errors);
-            reply = invoke(call, pipeline, transform, currentBody);
+            reply = invoke(call, pipeline, transform, currentBody, trace);
             errors = responseValidator.validate(responseSchema, reply.output());
             repairs++;
         }
         if (!errors.isEmpty()) {
+            trace.errors = errors;
             throw new ResponseValidationException(String.join("; ", errors), reply.evidence());
         }
         return reply.output();
     }
 
     /** Rate-limited, span-wrapped DIAL call that records best-effort spend and returns what the reply yields. */
-    private DialCall.Reply invoke(DialCall call, PipelineDto pipeline, TransformDto transform, String requestBody) {
-        if (!dialRateLimiter.acquire(pipeline.name(), pipeline.rateRpm())) {
+    private DialCall.Reply invoke(DialCall call, PipelineDto pipeline, TransformDto transform, String requestBody,
+                                  Trace trace) {
+        if (!trace.waits) {
+            if (!dialRateLimiter.tryAcquire(pipeline.name(), pipeline.rateRpm())) {
+                throw new DialRateLimitedException(pipeline.name());
+            }
+        } else if (!dialRateLimiter.acquire(pipeline.name(), pipeline.rateRpm())) {
             throw new TransientChunkException(DlqStage.DIAL_CALL, "rate limited for pipeline " + pipeline.name(), null);
         }
+        trace.attempts++;
         TransformPreset preset = call.preset();
         var sample = runnerMetrics.startDialTimer();
         String raw;
@@ -163,6 +259,7 @@ public class TransformInvoker {
             throw e;
         }
         runnerMetrics.recordDialSuccess(preset, sample);
+        trace.response = raw;
         DialCall.Reply reply;
         try {
             reply = call.read(pipeline, raw);
@@ -172,6 +269,7 @@ public class TransformInvoker {
             throw unreadable;
         }
         spendService.record(pipeline.name(), pipeline.generation(), reply.usage(), call.usageUnit(), false);
+        trace.usage += reply.usage();
         return reply;
     }
 

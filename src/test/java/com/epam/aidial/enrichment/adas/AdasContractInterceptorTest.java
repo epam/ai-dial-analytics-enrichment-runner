@@ -197,17 +197,17 @@ class AdasContractInterceptorTest {
     }
 
     /**
-     * Pinned as a literal, not as {@link AdasContract#VERSION_VALUE}: the far side's constant is {@code 6} since
-     * ADAS added {@code advanced.input_token_budget}, and a test reading the constant back would pass whatever it said.
+     * Pinned as a literal, not as {@link AdasContract#VERSION_VALUE}: the far side's constant is {@code 7} since
+     * ADAS added {@code trial-input}, and a test reading the constant back would pass whatever it said.
      */
     @Test
-    void everyCallDeclaresContractVersionSix() {
+    void everyCallDeclaresContractVersionSeven() {
         ADAS.stubFor(post(urlPathEqualTo(ROWS_PATH)).willReturn(okJson("{\"inserted\":1}")));
 
         postRows();
 
-        assertThat(AdasContract.VERSION).isEqualTo(6);
-        ADAS.verify(postRequestedFor(urlPathEqualTo(ROWS_PATH)).withHeader(AdasContract.HEADER, equalTo("6")));
+        assertThat(AdasContract.VERSION).isEqualTo(7);
+        ADAS.verify(postRequestedFor(urlPathEqualTo(ROWS_PATH)).withHeader(AdasContract.HEADER, equalTo("7")));
         assertThat(compatibilityState.isCompatible()).isTrue();
     }
 

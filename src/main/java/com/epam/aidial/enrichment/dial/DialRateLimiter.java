@@ -23,6 +23,21 @@ public class DialRateLimiter {
 
     /** Tries to acquire a permit for the pipeline, waiting up to the configured timeout. */
     public boolean acquire(String pipelineName, Integer pipelineRpm) {
+        return limiter(pipelineName, pipelineRpm).acquirePermission();
+    }
+
+    /**
+     * Takes a permit from the pipeline's limiter only if one is free now, never waiting for one: the dry run asks this
+     * way so an author's click is refused rather than queued behind the pipeline's own work, and never holds a permit
+     * that work is waiting on. Two callers racing for the last permit may both be refused, which costs a retry, not a
+     * call over the budget.
+     */
+    public boolean tryAcquire(String pipelineName, Integer pipelineRpm) {
+        RateLimiter limiter = limiter(pipelineName, pipelineRpm);
+        return limiter.getMetrics().getAvailablePermissions() > 0 && limiter.acquirePermission();
+    }
+
+    private RateLimiter limiter(String pipelineName, Integer pipelineRpm) {
         int rpm = pipelineRpm != null && pipelineRpm > 0 ? pipelineRpm : dialProperties.defaultRpm();
         RateLimiter limiter = registry.rateLimiter(pipelineName, () -> config(rpm));
         if (limiter.getRateLimiterConfig().getLimitForPeriod() != rpm) {
@@ -31,7 +46,7 @@ public class DialRateLimiter {
             registry.remove(pipelineName);
             limiter = registry.rateLimiter(pipelineName, () -> config(rpm));
         }
-        return limiter.acquirePermission();
+        return limiter;
     }
 
     /** Drops a pipeline's limiter when the pipeline leaves the synced set, bounding registry growth over churn. */
