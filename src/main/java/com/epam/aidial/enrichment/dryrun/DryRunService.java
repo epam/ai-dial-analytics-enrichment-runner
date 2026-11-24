@@ -86,7 +86,7 @@ public class DryRunService {
      * @throws DryRunAdasUnavailableException when ADAS could not be read
      * @throws PipelineNotRunnableException   when this runner would refuse to admit the declaration
      * @throws SpendBudgetExhaustedException  when the pipeline has reached its daily spend budget
-     * @throws DialRateLimitedException       when the pipeline's rate limiter had no permit free
+     * @throws DialRateLimitedException       when the pipeline's rate limiter had no permit free, and so no call was made
      */
     public DryRunResponse dryRun(String pipelineName, DryRunRequest request, InboundCredential caller) {
         if (!inFlight.add(pipelineName)) {
@@ -106,6 +106,11 @@ public class DryRunService {
     }
 
     private DryRunResponse run(String pipelineName, DryRunRequest request, InboundCredential caller) {
+        // Asked before the read: the budget is the pipeline's, not the sample's, and a refused dry run should not
+        // first pull a whole group of bodies out of ADAS. A sql pipeline records no spend, so it is never over.
+        if (spendPauseGate.isOverBudget(pipelineName)) {
+            throw new SpendBudgetExhaustedException(pipelineName);
+        }
         TrialInputResponse input = readTrialInput(pipelineName, request, caller);
         PipelineDto pipeline = input.pipeline();
         String problem = PipelineRouting.unsupportedReason(pipeline);
@@ -117,13 +122,24 @@ public class DryRunService {
             // ADAS's notes say why the sample is empty; there is nothing to call the model on.
             return new DryRunResponse(input.preview(), List.of());
         }
-        if (spendPauseGate.isOverBudget(pipeline)) {
-            throw new SpendBudgetExhaustedException(pipelineName);
-        }
-        List<DryRunEvaluationDto> evaluations = PipelineRouting.isGroup(pipeline)
+        List<Evaluation> evaluations = PipelineRouting.isGroup(pipeline)
                 ? List.of(evaluateGroup(pipeline, groupKeyOf(input.preview()), rows, Boolean.TRUE.equals(input.truncated())))
                 : evaluateRows(pipeline, rows);
-        return new DryRunResponse(input.preview(), evaluations);
+        // Refused as a whole only when the limiter stopped it before anything was spent; once a call has been paid
+        // for, its answer is returned, with the call the limiter refused as a failed evaluation beside it.
+        boolean anyCall = evaluations.stream().anyMatch(e -> e.dto().attempts() > 0);
+        if (!anyCall && evaluations.stream().anyMatch(Evaluation::rateLimited)) {
+            throw new DialRateLimitedException(pipelineName);
+        }
+        return new DryRunResponse(input.preview(), evaluations.stream().map(Evaluation::dto).toList());
+    }
+
+    /** One evaluation's answer, and whether it ended at a rate-limit refusal. */
+    private record Evaluation(DryRunEvaluationDto dto, boolean rateLimited) {
+
+        static Evaluation of(DryRunEvaluationDto dto) {
+            return new Evaluation(dto, false);
+        }
     }
 
     private TrialInputResponse readTrialInput(String pipelineName, DryRunRequest request, InboundCredential caller) {
@@ -165,21 +181,21 @@ public class DryRunService {
     }
 
     /** Each row in order, concurrently: at most five, one model call each, on threads apart from the worker pool. */
-    private List<DryRunEvaluationDto> evaluateRows(PipelineDto pipeline, List<Map<String, Object>> rows) {
+    private List<Evaluation> evaluateRows(PipelineDto pipeline, List<Map<String, Object>> rows) {
         try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            List<Future<DryRunEvaluationDto>> futures = new ArrayList<>(rows.size());
+            List<Future<Evaluation>> futures = new ArrayList<>(rows.size());
             for (Map<String, Object> row : rows) {
                 futures.add(executor.submit(() -> evaluateRow(pipeline, row)));
             }
-            List<DryRunEvaluationDto> evaluations = new ArrayList<>(rows.size());
-            for (Future<DryRunEvaluationDto> future : futures) {
+            List<Evaluation> evaluations = new ArrayList<>(rows.size());
+            for (Future<Evaluation> future : futures) {
                 evaluations.add(await(future));
             }
             return evaluations;
         }
     }
 
-    private static DryRunEvaluationDto await(Future<DryRunEvaluationDto> future) {
+    private static Evaluation await(Future<Evaluation> future) {
         try {
             return future.get();
         } catch (InterruptedException e) {
@@ -193,28 +209,28 @@ public class DryRunService {
         }
     }
 
-    private DryRunEvaluationDto evaluateRow(PipelineDto pipeline, Map<String, Object> row) {
+    private Evaluation evaluateRow(PipelineDto pipeline, Map<String, Object> row) {
         Object grainKey = row.get(pipeline.grainKey());
         Map<String, Object> inputs;
         try {
             inputs = inputMapper.map(pipeline, row);
         } catch (RuntimeException e) {
-            return failedBeforeCall(grainKey, null, DlqStage.INPUT_MAP, e.getMessage(), pipeline);
+            return Evaluation.of(failedBeforeCall(grainKey, null, DlqStage.INPUT_MAP, e.getMessage(), pipeline));
         }
         TrialOutcome outcome = transformInvoker.trial(pipeline, pipeline.transform(), inputs);
-        return toDto(grainKey, null, outcome, null);
+        return new Evaluation(toDto(grainKey, null, outcome, null), outcome.rateLimited());
     }
 
-    private DryRunEvaluationDto evaluateGroup(PipelineDto pipeline, String groupKey, List<Map<String, Object>> members,
-                                              boolean fetchTruncated) {
+    private Evaluation evaluateGroup(PipelineDto pipeline, String groupKey, List<Map<String, Object>> members,
+                                     boolean fetchTruncated) {
         GroupInputAssembler.AssembledInput assembled;
         try {
             assembled = groupInputAssembler.assemble(pipeline, members, fetchTruncated);
         } catch (RuntimeException e) {
-            return failedBeforeCall(null, groupKey, DlqStage.GROUP_MAP, e.getMessage(), pipeline);
+            return Evaluation.of(failedBeforeCall(null, groupKey, DlqStage.GROUP_MAP, e.getMessage(), pipeline));
         }
         TrialOutcome outcome = transformInvoker.trial(pipeline, pipeline.transform(), assembled.asInputs());
-        return toDto(null, groupKey, outcome, assembled);
+        return new Evaluation(toDto(null, groupKey, outcome, assembled), outcome.rateLimited());
     }
 
     private DryRunEvaluationDto failedBeforeCall(Object grainKey, String groupKey, DlqStage stage, String message,
@@ -259,15 +275,14 @@ public class DryRunService {
             if (text == null) {
                 return new Capped(null, null);
             }
-            byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
-            if (bytes.length <= RETURNED_BYTES) {
+            if (text.getBytes(StandardCharsets.UTF_8).length <= RETURNED_BYTES) {
                 return new Capped(text, false);
             }
             int end = 0;
             int size = 0;
             while (end < text.length()) {
                 int codePoint = text.codePointAt(end);
-                int width = new String(Character.toChars(codePoint)).getBytes(StandardCharsets.UTF_8).length;
+                int width = utf8Width(codePoint);
                 if (size + width > RETURNED_BYTES) {
                     break;
                 }
@@ -275,6 +290,20 @@ public class DryRunService {
                 end += Character.charCount(codePoint);
             }
             return new Capped(text.substring(0, end), true);
+        }
+
+        /** The bytes {@code codePoint} takes in UTF-8, as {@code getBytes} writes it: a lone surrogate as one {@code ?}. */
+        private static int utf8Width(int codePoint) {
+            if (codePoint < 0x80) {
+                return 1;
+            }
+            if (codePoint < 0x800) {
+                return 2;
+            }
+            if (codePoint < 0x10000) {
+                return Character.isSurrogate((char) codePoint) ? 1 : 3;
+            }
+            return 4;
         }
     }
 }

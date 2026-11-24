@@ -20,6 +20,8 @@ import java.util.Map;
  * @param dialStatus DIAL's HTTP status for a refused call; null otherwise
  * @param message    what failed, for people; null when the evaluation succeeded
  * @param errors     the response-schema violations of the last reply, empty unless the failure is at {@code validate}
+ * @param rateLimited whether the failure is a call the pipeline's rate limiter had no permit for — at {@code dial_call},
+ *                    after {@code attempts} calls that were made
  */
 public record TrialOutcome(
         Map<String, Object> outputs,
@@ -32,7 +34,8 @@ public record TrialOutcome(
         DlqStage stage,
         Integer dialStatus,
         String message,
-        List<String> errors) {
+        List<String> errors,
+        boolean rateLimited) {
 
     public boolean ok() {
         return stage == null;

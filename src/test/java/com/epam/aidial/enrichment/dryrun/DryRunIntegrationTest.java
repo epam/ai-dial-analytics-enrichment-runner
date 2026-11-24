@@ -3,6 +3,7 @@ package com.epam.aidial.enrichment.dryrun;
 import com.epam.aidial.enrichment.adas.AdasCompatibilityState;
 import com.epam.aidial.enrichment.adas.dto.OutputDto;
 import com.epam.aidial.enrichment.adas.dto.PipelineDto;
+import com.epam.aidial.enrichment.configuration.DialProperties;
 import com.epam.aidial.enrichment.dial.DialRateLimiter;
 import com.epam.aidial.enrichment.integration.PostgresContainerSupport;
 import com.epam.aidial.enrichment.spend.SpendService;
@@ -83,6 +84,9 @@ class DryRunIntegrationTest {
 
     @Autowired
     private DialRateLimiter dialRateLimiter;
+
+    @Autowired
+    private DialProperties dialProperties;
 
     @Autowired
     private AdasCompatibilityState compatibilityState;
@@ -414,6 +418,8 @@ class DryRunIntegrationTest {
                 .andExpect(jsonPath("$.error").value("spend_budget_exhausted"));
 
         assertThat(BACKEND.findAll(postRequestedFor(urlPathEqualTo(CHAT_PATH)))).isEmpty();
+        // Refused before the read: nothing is pulled out of ADAS for a dry run that cannot spend.
+        assertThat(BACKEND.findAll(postRequestedFor(urlPathEqualTo(TRIAL_PATH)))).isEmpty();
     }
 
     @Test
@@ -430,6 +436,31 @@ class DryRunIntegrationTest {
                 .andExpect(jsonPath("$.error").value("dial_rate_limited"));
 
         assertThat(BACKEND.findAll(postRequestedFor(urlPathEqualTo(CHAT_PATH)))).isEmpty();
+    }
+
+    /**
+     * The limiter runs dry between the first call and its corrective retry: the paid-for first reply is answered as a
+     * failed evaluation at {@code dial_call}, not discarded behind a 429.
+     */
+    @Test
+    void rateLimiterRefusingTheRetryKeepsTheReplyAlreadyPaidFor() throws Exception {
+        PipelineDto pipeline = rowPipeline();
+        for (int i = 0; i < dialProperties.defaultRpm() - 1; i++) {
+            assertThat(dialRateLimiter.tryAcquire(PIPELINE, pipeline.rateRpm())).isTrue();
+        }
+        stubTrialInput(pipeline, List.of(row("e1", "hi")), null, null);
+        stubChat("{\"other\":1}", 5);
+
+        dryRun("{}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.evaluations[0].status").value("failed"))
+                .andExpect(jsonPath("$.evaluations[0].stage").value("dial_call"))
+                .andExpect(jsonPath("$.evaluations[0].attempts").value(1))
+                .andExpect(jsonPath("$.evaluations[0].message").value(org.hamcrest.Matchers.containsString("rate-limit")))
+                .andExpect(jsonPath("$.evaluations[0].response").value(org.hamcrest.Matchers.containsString("other")));
+
+        assertThat(BACKEND.findAll(postRequestedFor(urlPathEqualTo(CHAT_PATH)))).hasSize(1);
+        assertThat(spend("calls")).isEqualTo(1);
     }
 
     @Test

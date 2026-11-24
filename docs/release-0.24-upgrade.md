@@ -109,8 +109,9 @@ the request sent, the reply, the outputs, and the stage a failure would have bee
 [`pipeline-dry-run`](../openspec/specs/pipeline-dry-run/spec.md)).
 
 - **It spends.** Each call counts towards the pipeline's daily spend and is refused with `429 spend_budget_exhausted`
-  once the soft budget is reached. It takes a rate-limit permit only if one is free (`429 dial_rate_limited`
-  otherwise), and runs one at a time per pipeline (`409 dry_run_in_progress`).
+  once the soft budget is reached. It takes a rate-limit permit only if one is free: `429 dial_rate_limited`
+  when none is before its first call, and a failed `dial_call` evaluation for a later call, so replies already
+  paid for are returned. It runs one at a time per pipeline (`409 dry_run_in_progress`).
 - **It writes nothing else.** No dead letter, write-back, cursor move, group stamp or breaker count.
 - **It reads as the caller.** The runner forwards the caller's `Authorization` or `Api-Key` to ADAS on this one
   call, so ADAS's column and row restrictions and the `app-routes` allowlist apply to the caller.

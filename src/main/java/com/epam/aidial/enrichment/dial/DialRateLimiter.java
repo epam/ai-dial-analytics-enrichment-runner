@@ -27,10 +27,10 @@ public class DialRateLimiter {
     }
 
     /**
-     * Takes a permit from the pipeline's limiter only if one is free now, never waiting for one: the dry run asks this
-     * way so an author's click is refused rather than queued behind the pipeline's own work, and never holds a permit
-     * that work is waiting on. Two callers racing for the last permit may both be refused, which costs a retry, not a
-     * call over the budget.
+     * Takes a permit from the pipeline's limiter only if one is free now: the dry run asks this way so an author's
+     * click is refused rather than queued behind the pipeline's own work. The check and the take are two steps, so a
+     * caller that loses the last permit to another between them waits for the next one, up to the limiter's timeout,
+     * as {@link #acquire} would; it never takes a permit beyond the budget.
      */
     public boolean tryAcquire(String pipelineName, Integer pipelineRpm) {
         RateLimiter limiter = limiter(pipelineName, pipelineRpm);

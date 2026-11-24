@@ -127,14 +127,12 @@ public class TransformInvoker {
      *
      * <p>It keeps the two effects that belong to the call itself: the spend is recorded, because the money is spent,
      * and a permanently refused call is recorded as a failure, as a worker records it. It differs from a worker's
-     * evaluation in two ways only. A rate-limit permit is taken only if one is free now, and a
-     * {@link DialRateLimitedException} is thrown when none is, so a dry run never waits behind the pipeline's own
-     * work. And a transient failure is reported rather than retried with backoff: the caller is a person waiting on
-     * the answer.
+     * evaluation in two ways only. A rate-limit permit is taken only if one is free now, so a dry run never waits
+     * behind the pipeline's own work; a call refused one is reported as a {@link TrialOutcome#rateLimited()} failure
+     * at {@code dial_call}, keeping what the attempts before it returned. And a transient failure is reported rather
+     * than retried with backoff: the caller is a person waiting on the answer.
      *
      * <p>Dead-lettering, write-back and every other runtime state stay the caller's to leave alone.
-     *
-     * @throws DialRateLimitedException when no rate-limit permit is free for a call
      */
     public TrialOutcome trial(PipelineDto pipeline, TransformDto transform, Map<String, Object> inputs) {
         DialCall call = callFor(transform);
@@ -147,7 +145,8 @@ public class TransformInvoker {
             Map<String, Object> outputs = outputMapper.map(pipeline, parseContent(content));
             return trace.outcome(outputs, call, started, null, null, null);
         } catch (DialRateLimitedException e) {
-            throw e;
+            // Before the first attempt nothing was called; before a corrective retry the first reply is kept.
+            return trace.rateLimited(call, started, e.getMessage());
         } catch (UnresolvedPlaceholderException e) {
             // Raised before any request is built, so nothing was called or charged; the worker's `input_map` stage.
             return trace.outcome(null, call, started, DlqStage.INPUT_MAP, null, e.getMessage());
@@ -200,9 +199,18 @@ public class TransformInvoker {
 
         TrialOutcome outcome(Map<String, Object> outputs, DialCall call, long startedNanos, DlqStage stage,
                              Integer dialStatus, String message) {
+            return build(outputs, call, startedNanos, stage, dialStatus, message, false);
+        }
+
+        TrialOutcome rateLimited(DialCall call, long startedNanos, String message) {
+            return build(null, call, startedNanos, DlqStage.DIAL_CALL, null, message, true);
+        }
+
+        private TrialOutcome build(Map<String, Object> outputs, DialCall call, long startedNanos, DlqStage stage,
+                                   Integer dialStatus, String message, boolean rateLimited) {
             long latencyMs = (System.nanoTime() - startedNanos) / 1_000_000;
             return new TrialOutcome(outputs, request, response, attempts, usage, call.usageUnit(), latencyMs, stage,
-                    dialStatus, message, stage == DlqStage.VALIDATE ? List.copyOf(errors) : List.of());
+                    dialStatus, message, stage == DlqStage.VALIDATE ? List.copyOf(errors) : List.of(), rateLimited);
         }
     }
 

@@ -66,8 +66,11 @@ towards ADAS, which accepts the same issuers.
 render, `callWithRepair` and `OutputMapper` steps. It returns the rendered body of the first attempt, the last
 raw reply, the attempt count, usage and latency, and the classified failure (stage, DIAL status, validation
 errors) instead of throwing. It keeps `invoke`'s spend recording and rate-limiter use. The rate limiter is
-asked through a non-blocking `tryAcquire`, so a busy pipeline answers 429 instead of holding a permit its
-workers need. `DialCall` stays package-private, and the trial entry point lives in the same package.
+asked through `tryAcquire`, which takes a permit only when one is free, so a busy pipeline answers 429 instead
+of queueing behind its workers. A refusal before any call is a 429. A refusal after a call was paid for (a
+second row, or a corrective retry) ends only that evaluation, as `failed` at `dial_call`, so the answers
+already bought are returned. `DialCall` stays package-private, and the trial entry point lives in the same
+package.
 
 Failure classification reuses the workers' table, so the stages read the same as in the DLQ. The difference
 is that nothing is dead-lettered, and a transient failure is reported instead of retried with backoff: a

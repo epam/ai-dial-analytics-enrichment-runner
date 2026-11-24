@@ -28,7 +28,7 @@
 - [x] 4.3 App route: route URL, no `response_format`, no corrective retry, `source` mapping
 - [x] 4.4 Failures: DIAL 404 → `dial_call`/`404`; schema miss after retry → `validate` with `attempts: 2`; JSONata output error → `output_map`; unresolved placeholder → `input_map` with no call
 - [x] 4.5 Side effects: no DLQ row, no upsert task or write-back, no group state; spend counter incremented (the dry-run path holds no breaker or cursor dependency to touch)
-- [x] 4.6 Refusals: ADAS 403/422 passthrough with no DIAL call; spend gate 429; rate limiter 429; concurrent 409; admission 422; ADAS timeout 503 with the verdict unchanged; contract mismatch 503
+- [x] 4.6 Refusals: ADAS 403/422 passthrough with no DIAL call; spend gate 429 before the trial-input read; rate limiter 429 before any call, and a refused corrective retry answered as a failed `dial_call` evaluation keeping the paid reply; concurrent 409; admission 422; ADAS timeout 503 with the verdict unchanged; contract mismatch 503
 - [x] 4.7 Credential: the trial-input request carries the caller's bearer token and no service `Api-Key`; `none` mode uses the service key
 - [x] 4.8 Parity: the same fixture through the worker and through `try` sends identical DIAL requests and maps identical outputs
 - [x] 4.9 Logging: at TRACE, no record contains member content, the rendered request or the reply (pin `org.springframework.web.servlet.mvc.method.annotation`, which logged the response body)

@@ -108,10 +108,13 @@ declaration evaluated, exactly as a worker's calls are: tokens for `chat_complet
 let dry runs exceed a budget that reports itself as respected.
 
 When the soft daily spend gate is enabled and the pipeline's day-to-date usage has reached its budget, the
-dry run SHALL be refused with HTTP 429 `spend_budget_exhausted` before any DIAL call. Each DIAL call SHALL take
-a permit from the pipeline's rate limiter without waiting for one. When none is available, the dry run SHALL
-be refused with HTTP 429 `dial_rate_limited` rather than delay the pipeline's own work. A call already made
-by that dry run stays recorded.
+dry run SHALL be refused with HTTP 429 `spend_budget_exhausted` before trial-input is read and before any DIAL
+call. Each DIAL call SHALL take a permit from the pipeline's rate limiter only if one is free, rather than
+delay the pipeline's own work. When the limiter refuses a call and the dry run has made no DIAL call, the dry
+run SHALL be refused with HTTP 429 `dial_rate_limited`. Once one of its calls has been made, a refused call
+SHALL instead end its own evaluation as `failed` at `dial_call`, with a `message` naming the rate limit and
+the `attempts`, `response` and `usage` of the calls before it, and every other evaluation SHALL be answered
+as usual: those calls were paid for, so their answers are returned rather than discarded behind a 429.
 
 At most one dry run SHALL be in progress per pipeline. A second one SHALL be refused with HTTP 409
 `dry_run_in_progress`.
@@ -130,7 +133,8 @@ work.
 
 - **GIVEN** the spend gate is enabled and the pipeline has reached its daily call budget
 - **WHEN** it is tried
-- **THEN** the response is HTTP 429 `spend_budget_exhausted` and no DIAL call is made
+- **THEN** the response is HTTP 429 `spend_budget_exhausted`, trial-input is not called, and no DIAL call is
+  made
 
 #### Scenario: A failing dry run leaves no dead letter
 
@@ -148,6 +152,15 @@ work.
 - **GIVEN** the pipeline's rate limiter has no permit available
 - **WHEN** it is tried
 - **THEN** the response is HTTP 429 `dial_rate_limited` and no DIAL call is made
+
+#### Scenario: A limiter refusal after a paid call keeps that call's answer
+
+- **GIVEN** a `chat_completion` pipeline whose rate limiter has one permit left, and a model whose first reply
+  fails response validation
+- **WHEN** it is tried
+- **THEN** the response is HTTP 200 with one evaluation whose `status` is `failed`, `stage` is `dial_call`,
+  `attempts` is `1`, `message` names the rate limit and `response` holds the first reply
+- **AND** the pipeline's day-to-date usage rises by that one call
 
 ### Requirement: A dry run answers with the preview and one evaluation per subject
 
