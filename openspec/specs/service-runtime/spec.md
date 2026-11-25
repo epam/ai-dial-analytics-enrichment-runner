@@ -256,12 +256,15 @@ SHALL be recorded as the follow-up rather than implied to exist.
 The runner SHALL NOT log assembled group input, member rows, or rendered prompts at **any** level. This
 covers the framework as well as the runner's own code: Spring's HTTP client logs request and response bodies
 at DEBUG/TRACE, and for this service those bodies *are* the enrichment payloads — a rendered prompt carries the
-source content a pipeline reads. Those loggers SHALL therefore be pinned independently of the application log
+source content a pipeline reads. Spring MVC's response-body writer likewise logs the body it writes at DEBUG, and the
+dry run's response carries the rendered request, the members and the reply (see the `pipeline-dry-run`
+capability). Those loggers SHALL therefore be pinned independently of the application log
 level, so raising verbosity for diagnosis cannot silently start writing source content to the log pipeline.
 Supplying a logging configuration that overrides the pin re-enables body logging, which a deployment handling
 sensitive data SHALL NOT do.
 
-The pinned set SHALL be `org.springframework.web.client` and `org.springframework.http.converter` (bodies) and
+The pinned set SHALL be `org.springframework.web.client`, `org.springframework.http.converter` and
+`org.springframework.web.servlet.mvc.method.annotation` (bodies) and
 `org.hibernate.SQL`, `org.hibernate.orm.jdbc.bind` and `org.springframework.jdbc.core` (statements and bound
 values), each declared in `log4j2-spring.xml` with its own logger entry at INFO. Runtime level changes (see the
 `observability` capability) SHALL refuse any level below INFO for a pinned logger or any of its descendants.
@@ -303,4 +306,10 @@ future line in the enrichment path and the cost of breaking one is source conten
 - **GIVEN** the runtime level file sets `org.springframework` to DEBUG
 - **WHEN** the level is applied
 - **THEN** `org.springframework.web.client` and `org.springframework.http.converter` stay at INFO
+
+#### Scenario: A dry run's response body is not logged by the framework
+
+- **GIVEN** logging configured down to its most verbose level
+- **WHEN** a dry run answers with a rendered request, members and a reply
+- **THEN** no log record contains them, because the MVC response-body writer is pinned at INFO
 

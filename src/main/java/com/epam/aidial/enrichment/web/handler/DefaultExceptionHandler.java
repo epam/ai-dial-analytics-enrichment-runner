@@ -3,13 +3,22 @@ package com.epam.aidial.enrichment.web.handler;
 import com.epam.aidial.enrichment.exception.BackfillConflictException;
 import com.epam.aidial.enrichment.exception.BackfillRunNotFoundException;
 import com.epam.aidial.enrichment.exception.BackfillWindowException;
+import com.epam.aidial.enrichment.exception.DialRateLimitedException;
 import com.epam.aidial.enrichment.exception.DlqFilterException;
 import com.epam.aidial.enrichment.exception.DlqItemNotFoundException;
 import com.epam.aidial.enrichment.exception.DlqNotRequeueableException;
+import com.epam.aidial.enrichment.exception.DryRunAdasRefusalException;
+import com.epam.aidial.enrichment.exception.DryRunAdasUnavailableException;
+import com.epam.aidial.enrichment.exception.DryRunBodyException;
+import com.epam.aidial.enrichment.exception.DryRunInProgressException;
+import com.epam.aidial.enrichment.exception.DryRunLimitException;
+import com.epam.aidial.enrichment.exception.ErrorMessages;
 import com.epam.aidial.enrichment.exception.InvalidCursorException;
 import com.epam.aidial.enrichment.exception.PipelineCacheNotReadyException;
 import com.epam.aidial.enrichment.exception.PipelineNotFoundException;
 import com.epam.aidial.enrichment.exception.PipelineNotPausedException;
+import com.epam.aidial.enrichment.exception.PipelineNotRunnableException;
+import com.epam.aidial.enrichment.exception.SpendBudgetExhaustedException;
 import com.epam.aidial.enrichment.exception.UnknownEnumValueException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
@@ -17,6 +26,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -155,6 +165,61 @@ public class DefaultExceptionHandler {
     @ExceptionHandler(BackfillWindowException.class)
     public ErrorView handleBackfillWindow(HttpServletRequest req, BackfillWindowException ex) {
         return new ErrorView(req, HttpStatus.BAD_REQUEST, "bad_request", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    @ExceptionHandler(DryRunBodyException.class)
+    public ErrorView handleDryRunBody(HttpServletRequest req, DryRunBodyException ex) {
+        return new ErrorView(req, HttpStatus.BAD_REQUEST, "bad_request", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.CONFLICT)
+    @ExceptionHandler(DryRunInProgressException.class)
+    public ErrorView handleDryRunInProgress(HttpServletRequest req, DryRunInProgressException ex) {
+        return new ErrorView(req, HttpStatus.CONFLICT, "dry_run_in_progress", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.TOO_MANY_REQUESTS)
+    @ExceptionHandler(SpendBudgetExhaustedException.class)
+    public ErrorView handleSpendBudgetExhausted(HttpServletRequest req, SpendBudgetExhaustedException ex) {
+        return new ErrorView(req, HttpStatus.TOO_MANY_REQUESTS, "spend_budget_exhausted", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.TOO_MANY_REQUESTS)
+    @ExceptionHandler(DialRateLimitedException.class)
+    public ErrorView handleDialRateLimited(HttpServletRequest req, DialRateLimitedException ex) {
+        return new ErrorView(req, HttpStatus.TOO_MANY_REQUESTS, "dial_rate_limited", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)
+    @ExceptionHandler(PipelineNotRunnableException.class)
+    public ErrorView handlePipelineNotRunnable(HttpServletRequest req, PipelineNotRunnableException ex) {
+        return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "pipeline_not_runnable", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)
+    @ExceptionHandler(DryRunLimitException.class)
+    public ErrorView handleDryRunLimit(HttpServletRequest req, DryRunLimitException ex) {
+        return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "pipeline_validation_failed", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.SERVICE_UNAVAILABLE)
+    @ExceptionHandler(DryRunAdasUnavailableException.class)
+    public ErrorView handleDryRunAdasUnavailable(HttpServletRequest req, DryRunAdasUnavailableException ex) {
+        log.warn("[{}] Request: {} - ADAS unavailable to a dry run: {}", req.getMethod(), req.getServletPath(),
+                ErrorMessages.classify(ex.getCause() == null ? ex : ex.getCause()));
+        return new ErrorView(req, HttpStatus.SERVICE_UNAVAILABLE, ex.getCode(), ex.getMessage());
+    }
+
+    /**
+     * ADAS refused a dry run's input read, and the dry run answers with ADAS's own status, code and message — what the
+     * caller's ADAS preview would have answered. A status Spring does not name falls back to 502.
+     */
+    @ExceptionHandler(DryRunAdasRefusalException.class)
+    public ResponseEntity<ErrorView> handleDryRunAdasRefusal(HttpServletRequest req, DryRunAdasRefusalException ex) {
+        HttpStatus status = HttpStatus.resolve(ex.getStatus());
+        HttpStatus effective = status == null ? HttpStatus.BAD_GATEWAY : status;
+        return ResponseEntity.status(effective).body(new ErrorView(req, effective, ex.getCode(), ex.getMessage()));
     }
 
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)

@@ -556,7 +556,8 @@ work-item identity requirements in `incremental-scan` and `group-enrichment`.
 ### Requirement: Every ADAS call declares a contract version and every response is checked for its echo
 
 The runner SHALL send an `Adas-Contract-Version` request header, naming the contract version this build
-was written against, on **every** call to ADAS — the sync feed and all four data-plane endpoints — and
+was written against, on **every** call to ADAS — the sync feed, all four data-plane endpoints and the dry run's
+trial-input read — and
 SHALL verify that each ADAS response carries the same value in a header of the same name. A response whose
 echo is **absent** SHALL be treated as coming from an ADAS older than the contract; a response whose echo
 **differs** SHALL be treated as coming from an ADAS on the other side of a version bump. Both SHALL be
@@ -596,8 +597,14 @@ Under contract 6 an entry's `advanced` may carry `input_token_budget`. A runner 
 keep trimming a pipeline whose operator switched trimming off, or set a ceiling of its own, with nothing to say
 so. The echo check refuses that build as a whole instead, and nothing else is added for it.
 
+**Adding the dry run's `trial-input` read raises it to 7**, on both sides in the same window. Under contract 7
+ADAS serves `POST /v1/pipelines/{name}/trial-input` (see the `pipeline-dry-run` capability). A runner on 7
+talking to an ADAS on 6 would meet an unmapped-path `404` it could not tell from an unknown pipeline without
+reading codes, and an ADAS on 7 refuses a runner on 6 on every data-plane call. The echo check refuses the
+pair as a whole instead, and nothing else is added for it.
+
 **No `contract` query parameter SHALL be added to the feed request, and no `contract` member SHALL be
-read from a response body.** Both would duplicate this header. The header already covers the feed and all four data-plane endpoints, and it covers responses a body member
+read from a response body.** Both would duplicate this header. The header already covers the feed, the four data-plane endpoints and the trial-input read, and it covers responses a body member
 cannot reach — a `401`, a `403`, an unmapped-path `404` — which is the distinction that makes an absent
 echo mean "older than the contract" rather than "malformed". Two integers with one bump condition would
 be two spellings of one fact.
@@ -609,7 +616,7 @@ met first by whichever call comes first — usually a scan tick or a write-back,
 verdict recorded only by the poll would leave the paid-work gate (see the `enrichment-worker` capability)
 reading a stale *compatible* for up to a poll interval.
 
-ADAS carries the echo on responses under its `/v1/pipelines` prefix, where all five of this runner's call
+ADAS carries the echo on responses under its `/v1/pipelines` prefix, where all six of this runner's call
 sites lie. A call site added outside that prefix SHALL be treated as a change to both halves of the
 contract, since it would receive no echo and be classified as skewed.
 
@@ -670,10 +677,10 @@ without meaning skew, and neither SHALL produce a verdict or change the recorded
 - **WHEN** a runner built on contract `5` polls the feed
 - **THEN** the response is classified incompatible and no pipeline is admitted from it
 
-#### Scenario: The runner declares contract 6
+#### Scenario: The runner declares contract 7
 
-- **WHEN** the runner makes any call to ADAS
-- **THEN** the call carries `Adas-Contract-Version: 6`, and a response echoing `5` is classified incompatible
+- **WHEN** the runner makes any call to ADAS, the trial-input read included
+- **THEN** the call carries `Adas-Contract-Version: 7`, and a response echoing `6` is classified incompatible
 
 ### Requirement: An incompatible ADAS stalls the runner instead of steering it
 

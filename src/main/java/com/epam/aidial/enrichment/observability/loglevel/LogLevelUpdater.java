@@ -51,6 +51,7 @@ public class LogLevelUpdater {
     static final List<String> SENSITIVE_LOGGERS = List.of(
             "org.springframework.web.client",
             "org.springframework.http.converter",
+            "org.springframework.web.servlet.mvc.method.annotation",
             "org.hibernate.SQL",
             "org.hibernate.orm.jdbc.bind",
             "org.springframework.jdbc.core");
